@@ -1,5 +1,5 @@
 workflows:
-  build-web-netlify:
+  build-web-cloudflare:
     name: 🌐 Build Web & Deploy cloudflare
     instance_type: mac_mini_m2
     environment:
