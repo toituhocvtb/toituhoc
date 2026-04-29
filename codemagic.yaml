@@ -1,10 +1,8 @@
 workflows:
-  # ==========================================
-  # 1. LUỒNG IOS: BUILD & PATCH (SHOREBIRD)
-  # ==========================================
   smart-shorebird-ios:
-    name: 🚀 / 🩹 Smart Shorebird iOS (TOI TU HOC)
+    name: 🚀 / 🩹 Smart Shorebird iOS
     instance_type: mac_mini_m2
+
     integrations:
       app_store_connect: "Elearning Phong Key"
 
@@ -14,15 +12,15 @@ workflows:
       branch_patterns:
         - pattern: "*"
           include: true
-      # SỬA LỖI TẠI ĐÂY: Phải có cả pattern và include
-      commit_message_patterns:
-        - pattern: ".*\\[(Release|Patch) iOS\\].*"
-          include: true
 
     environment:
       flutter: 3.41.4
       vars:
-        TARGET_PATCH_VERSION: "latest"
+        # DOI PHIEN BAN CAN VA KHI CHAY [Patch iOS]
+        # Co the de "latest" neu muon Shorebird tu chon ban release moi nhat.
+        TARGET_PATCH_VERSION: "1.1.12+58"
+        IOS_BUNDLE_ID: "vn.com.vietinbank.toituhoc"
+        IOS_CERT_COMMON_NAME: "Apple Distribution: Le Nhung (6KYDAR364C)"
       groups:
         - shorebird_vars
 
@@ -41,78 +39,213 @@ workflows:
 
             : "${IOS_DISTRIBUTION_P12_BASE64:?Missing IOS_DISTRIBUTION_P12_BASE64}"
             : "${IOS_DISTRIBUTION_P12_PASSWORD:?Missing IOS_DISTRIBUTION_P12_PASSWORD}"
+            : "${IOS_SIGNING_CERT_ID:?Missing IOS_SIGNING_CERT_ID}"
+            : "${IOS_BUNDLE_ID:?Missing IOS_BUNDLE_ID}"
+            : "${IOS_CERT_COMMON_NAME:?Missing IOS_CERT_COMMON_NAME}"
 
             P12_PATH="/tmp/ios_distribution_temp.p12"
             KEY_RAW="/tmp/ios_distribution_private_raw.key"
             KEY_PEM="/tmp/ios_distribution_private.pem"
             CERT_DIR="$HOME/Library/Developer/Xcode/UserData/Certificates"
             PROFILE_DIR="$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"
+            KEYCHAIN_PATH_SAFE="${CM_KEYCHAIN_PATH:-}"
 
             export P12_PATH
             python3 -c 'import base64, os, pathlib; pathlib.Path(os.environ["P12_PATH"]).write_bytes(base64.b64decode(os.environ["IOS_DISTRIBUTION_P12_BASE64"]))'
 
-            openssl pkcs12 -in "$P12_PATH" -nocerts -nodes -passin pass:"$IOS_DISTRIBUTION_P12_PASSWORD" -out "$KEY_RAW"
-            awk 'BEGIN{p=0} /-----BEGIN .*PRIVATE KEY-----/{p=1} p{print} /-----END .*PRIVATE KEY-----/{p=0}' "$KEY_RAW" > "$KEY_PEM"
+            echo "Trich private key tu p12 local..."
+            openssl pkcs12 -in "$P12_PATH" -nocerts -nodes \
+              -passin pass:"$IOS_DISTRIBUTION_P12_PASSWORD" \
+              -out "$KEY_RAW"
 
+            awk 'BEGIN{p=0} /-----BEGIN .*PRIVATE KEY-----/{p=1} p{print} /-----END .*PRIVATE KEY-----/{p=0}' "$KEY_RAW" > "$KEY_PEM"
+            grep -q "BEGIN .*PRIVATE KEY" "$KEY_PEM" || (echo "ERROR: Private key PEM not found" && exit 1)
+
+            echo "Don profile va certificate cache cu..."
             rm -f "$HOME/Library/MobileDevice/Provisioning Profiles/"*.mobileprovision || true
             rm -f "$PROFILE_DIR"/*.mobileprovision || true
             rm -f "$CERT_DIR"/*.p12 || true
 
-            # CẬP NHẬT: Bundle ID chuẩn của Toi Tu Hoc
-            app-store-connect fetch-signing-files "vn.com.vietinbank.toituhoc" \
+            if [ -n "$KEYCHAIN_PATH_SAFE" ]; then
+              echo "Chi giu keychain tam cua Codemagic trong search list..."
+              security list-keychains -d user -s "$KEYCHAIN_PATH_SAFE"
+            else
+              echo "CM_KEYCHAIN_PATH khong co san. Bo qua buoc gioi han keychain."
+            fi
+
+            echo "Fetch signing files tu Apple cho bundle id: $IOS_BUNDLE_ID"
+            app-store-connect fetch-signing-files "$IOS_BUNDLE_ID" \
               --type IOS_APP_STORE \
               --create \
               --delete-stale-profiles \
               --strict-match-identifier \
-              --certificate-key @file:"$KEY_PEM"
+              --certificate-key @file:"$KEY_PEM" \
+              --verbose
 
+            echo "Chi chon dung cert theo CERT ID da khai bao..."
             shopt -s nullglob
-            MATCHED_CERTS=("$CERT_DIR"/DISTRIBUTION_*.p12)
+            MATCHED_CERTS=("$CERT_DIR"/DISTRIBUTION_"$IOS_SIGNING_CERT_ID"_*.p12)
             shopt -u nullglob
-            
+
             if [ ${#MATCHED_CERTS[@]} -eq 0 ]; then
-              echo "ERROR: Khong tim thay p12!" && exit 1
+              echo "ERROR: Khong tim thay p12 cho cert id $IOS_SIGNING_CERT_ID"
+              echo "Danh sach certificate dang co:"
+              ls -l "$CERT_DIR" || true
+              exit 1
+            fi
+
+            if [ ${#MATCHED_CERTS[@]} -gt 1 ]; then
+              echo "ERROR: Tim thay nhieu hon 1 p12 cho cert id $IOS_SIGNING_CERT_ID"
+              printf '%s\n' "${MATCHED_CERTS[@]}"
+              exit 1
             fi
 
             SELECTED_CERT="${MATCHED_CERTS[0]}"
-            echo "Import cert: $SELECTED_CERT"
+            echo "Import dung cert da chi dinh:"
+            echo "$SELECTED_CERT"
             keychain add-certificates --certificate "$SELECTED_CERT"
 
-            CERT_SHA1="$(security find-certificate -Z -a -c "Apple Distribution" | awk '/SHA-1 hash:/ {print $3; exit}')"
-            
+            echo "Lay SHA1 cua cert vua import de khoa dung signing identity..."
+            CERT_SHA1="$(
+              security find-certificate -Z -a -c "$IOS_CERT_COMMON_NAME" \
+              | awk '/SHA-1 hash:/ {print $3; exit}'
+            )"
+
+            if [ -z "$CERT_SHA1" ]; then
+              echo "ERROR: Khong lay duoc SHA1 cua signing certificate: $IOS_CERT_COMMON_NAME"
+              echo "Danh sach signing identities hien co:"
+              if [ -n "$KEYCHAIN_PATH_SAFE" ]; then
+                security find-identity -v -p codesigning "$KEYCHAIN_PATH_SAFE" || true
+              else
+                security find-identity -v -p codesigning || true
+              fi
+              exit 1
+            fi
+
+            echo "SHA1 duoc su dung: $CERT_SHA1"
+
+            echo "Gan provisioning profile vao Xcode project..."
             xcode-project use-profiles --project ios/Runner.xcodeproj
+
+            echo "Khoa export_options.plist vao dung cert SHA1..."
             /usr/libexec/PlistBuddy -c "Set :signingCertificate $CERT_SHA1" "$HOME/export_options.plist" \
               || /usr/libexec/PlistBuddy -c "Add :signingCertificate string $CERT_SHA1" "$HOME/export_options.plist"
+
+            echo "Kiem tra export_options.plist sau khi cap nhat..."
+            /usr/libexec/PlistBuddy -c "Print" "$HOME/export_options.plist" || true
+
+            echo "Kiem tra signing identities trong keychain..."
+            if [ -n "$KEYCHAIN_PATH_SAFE" ]; then
+              security find-identity -v -p codesigning "$KEYCHAIN_PATH_SAFE" || true
+            else
+              security find-identity -v -p codesigning || true
+            fi
           }
 
           install_shorebird() {
             echo "2. Cai dat Shorebird..."
             curl --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/shorebirdtech/install/main/install.sh -sSf | sh
             export PATH="$HOME/.shorebird/bin:$PATH"
+            shorebird --version || true
           }
 
-          if [[ "$ACTUAL_COMMIT_MSG" == *"[Release iOS]"* ]]; then
+          if [[ "$ACTUAL_COMMIT_MSG" == *"[Release iOS]"* || "$ACTUAL_COMMIT_MSG" == *"[Release]"* ]]; then
+            echo "PHAT HIEN LENH RELEASE IOS -> Dong goi ban moi len TestFlight..."
             setup_ios_signing
             install_shorebird
-            echo "3. Build IPA Release (Version + Build $BUILD_NUMBER)..."
-            shorebird release ios --flutter-version=3.41.4 --no-confirm --build-number="$BUILD_NUMBER" --dart-define=GEMINI_API_KEY="$GEMINI_API_KEY" --export-options-plist="$HOME/export_options.plist"
-          elif [[ "$ACTUAL_COMMIT_MSG" == *"[Patch iOS]"* ]]; then
+            echo "3. Build IPA bang Shorebird..."
+            shorebird release ios \
+              --flutter-version=3.41.4 \
+              --no-confirm \
+              --build-number="$BUILD_NUMBER" \
+              --dart-define=GEMINI_API_KEY="$GEMINI_API_KEY" \
+              --export-options-plist="$HOME/export_options.plist"
+
+          elif [[ "$ACTUAL_COMMIT_MSG" == *"[Patch iOS]"* || "$ACTUAL_COMMIT_MSG" == *"[Patch]"* ]]; then
+            echo "PHAT HIEN LENH PATCH IOS -> Tao ban va..."
             setup_ios_signing
             install_shorebird
             echo "3. Tao Patch iOS cho phien ban: $TARGET_PATCH_VERSION..."
-            shorebird patch ios --release-version="$TARGET_PATCH_VERSION" --no-confirm --allow-asset-diffs --dart-define=GEMINI_API_KEY="$GEMINI_API_KEY"
+            shorebird patch ios \
+              --release-version="$TARGET_PATCH_VERSION" \
+              --no-confirm \
+              --allow-asset-diffs \
+              --dart-define=GEMINI_API_KEY="$GEMINI_API_KEY"
+            rm -rf build/ios/ipa/*.ipa || true
+
           else
-            echo "Khong co tag iOS phù hợp. Bo qua."
+            echo "Khong co tag [Release iOS]/[Release] hoac [Patch iOS]/[Patch]. Bo qua."
           fi
 
-  # ==========================================
-  # 2. LUỒNG WEB: BUILD & DEPLOY CLOUDFLARE
-  # ==========================================
+    artifacts:
+      - build/ios/ipa/*.ipa
+
+    publishing:
+      app_store_connect:
+        auth: integration
+        submit_to_testflight: false
+
+  smart-shorebird-android:
+    name: 🤖 Smart Shorebird Android (APK/AAB)
+    instance_type: mac_mini_m2
+    triggering:
+      events:
+        - push
+      branch_patterns:
+        - pattern: "*"
+          include: true
+    environment:
+      flutter: 3.41.4
+      vars:
+        TARGET_PATCH_VERSION: "1.0.0+1" # Sua lai version Android tuong ung khi can va
+      groups:
+        - shorebird_vars
+    scripts:
+      - name: 🚦 Phan loai va Thuc thi Shorebird Android
+        script: |
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          ACTUAL_COMMIT_MSG=$(git log -1 --pretty=%B)
+          echo "Tin nhan commit: $ACTUAL_COMMIT_MSG"
+
+          install_shorebird() {
+            echo "Cai dat Shorebird..."
+            curl --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/shorebirdtech/install/main/install.sh -sSf | sh
+            export PATH="$HOME/.shorebird/bin:$PATH"
+            shorebird --version || true
+          }
+
+          if [[ "$ACTUAL_COMMIT_MSG" == *"[Release Android]"* ]]; then
+            install_shorebird
+            echo "Build Release Android bang Shorebird..."
+            shorebird release android \
+              --flutter-version=3.41.4 \
+              --no-confirm \
+              --dart-define=GEMINI_API_KEY="$GEMINI_API_KEY"
+
+          elif [[ "$ACTUAL_COMMIT_MSG" == *"[Patch Android]"* ]]; then
+            install_shorebird
+            echo "Tao Patch Android cho phien ban: $TARGET_PATCH_VERSION..."
+            shorebird patch android \
+              --release-version="$TARGET_PATCH_VERSION" \
+              --no-confirm \
+              --dart-define=GEMINI_API_KEY="$GEMINI_API_KEY"
+
+          else
+            echo "Khong co tag [Release Android] hoac [Patch Android]. Bo qua buoc nay."
+          fi
+    artifacts:
+      - build/app/outputs/flutter-apk/*.apk
+      - build/app/outputs/bundle/release/*.aab
+
   build-web-cloudflare:
-    name: 🌐 Build Web & Deploy Cloudflare
+    name: 🌐 Build Web & Deploy Cloudflare Pages
     instance_type: mac_mini_m2
     environment:
       flutter: stable
+      vars:
+        CLOUDFLARE_PROJECT_NAME: "toituhoc"
       groups:
         - shorebird_vars
     triggering:
@@ -122,19 +255,30 @@ workflows:
         - pattern: "*"
           include: true
     scripts:
-      - name: 🚦 Kiem tra va Build Web
+      - name: 🚦 Kiem tra va Build Web Cloudflare
         script: |
           #!/usr/bin/env bash
           set -euo pipefail
-          ACTUAL_COMMIT_MSG=$(git log -1 --pretty=%B)
 
-          if [[ "$ACTUAL_COMMIT_MSG" == *"[skip web]"* ]]; then
-            echo "=> BO QUA luong Web."
+          ACTUAL_COMMIT_MSG=$(git log -1 --pretty=%B)
+          echo "Tin nhan commit: $ACTUAL_COMMIT_MSG"
+
+          if [[ "$ACTUAL_COMMIT_MSG" == *"[skip cloudflare]"* || "$ACTUAL_COMMIT_MSG" == *"[Release iOS]"* || "$ACTUAL_COMMIT_MSG" == *"[Patch iOS]"* || "$ACTUAL_COMMIT_MSG" == *"[Release Android]"* || "$ACTUAL_COMMIT_MSG" == *"[Patch Android]"* || "$ACTUAL_COMMIT_MSG" == *"[Release]"* || "$ACTUAL_COMMIT_MSG" == *"[Patch]"* ]]; then
+            echo "Bo qua build/deploy Web Cloudflare de tranh anh huong luong build mobile."
             exit 0
           fi
 
-          flutter pub get
-          flutter build web --release
+          : "${CLOUDFLARE_API_TOKEN:?Missing CLOUDFLARE_API_TOKEN}"
+          : "${CLOUDFLARE_ACCOUNT_ID:?Missing CLOUDFLARE_ACCOUNT_ID}"
+          : "${CLOUDFLARE_PROJECT_NAME:?Missing CLOUDFLARE_PROJECT_NAME}"
 
-          # CẬP NHẬT: Deploy len Cloudflare Pages thay vi Netlify
-          npx wrangler pages deploy build/web --project-name="toituhoc"
+          echo "Bat dau lay packages..."
+          flutter pub get
+
+          echo "Bat dau build Flutter Web..."
+          flutter build web --release \
+            --dart-define=GEMINI_API_KEY="$GEMINI_API_KEY"
+
+          echo "Bat dau deploy len Cloudflare Pages project: $CLOUDFLARE_PROJECT_NAME"
+          npx wrangler pages deploy build/web \
+            --project-name="$CLOUDFLARE_PROJECT_NAME"
