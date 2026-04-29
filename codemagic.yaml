@@ -1,6 +1,6 @@
 workflows:
-  smart-dispatch-build:
-    name: 🚦 Smart Dispatcher - iOS / Android / Cloudflare
+  ios-shorebird:
+    name: 🚀 Shorebird iOS Release / Patch
     instance_type: mac_mini_m2
 
     integrations:
@@ -12,22 +12,21 @@ workflows:
       branch_patterns:
         - pattern: "main"
           include: true
-      cancel_previous_builds: true
+      # Dat false de tranh truong hop 2 workflow cung nhanh tu huy lan nhau khi day commit lien tiep.
+      cancel_previous_builds: false
 
     environment:
       flutter: 3.41.4
       vars:
         FLUTTER_VERSION: "3.41.4"
         IOS_TARGET_PATCH_VERSION: "1.1.12+58"
-        ANDROID_TARGET_PATCH_VERSION: "1.0.0+1"
         IOS_BUNDLE_ID: "vn.com.vietinbank.toituhoc"
         IOS_CERT_COMMON_NAME: "Apple Distribution: Le Nhung (6KYDAR364C)"
-        CLOUDFLARE_PROJECT_NAME: "toituhoc"
       groups:
         - shorebird_vars
 
     scripts:
-      - name: 🚦 Chon dung luong can chay theo commit tag
+      - name: 🚀 Kiem tra tag va build iOS bang Shorebird
         script: |
           #!/usr/bin/env bash
           set -euo pipefail
@@ -37,22 +36,19 @@ workflows:
 
           WANT_IOS_RELEASE=0
           WANT_IOS_PATCH=0
-          WANT_ANDROID_RELEASE=0
-          WANT_ANDROID_PATCH=0
-          WANT_WEB_DEPLOY=0
 
           if [[ "$ACTUAL_COMMIT_MSG" == *"[Release iOS]"* ]]; then WANT_IOS_RELEASE=1; fi
           if [[ "$ACTUAL_COMMIT_MSG" == *"[Patch iOS]"* ]]; then WANT_IOS_PATCH=1; fi
-          if [[ "$ACTUAL_COMMIT_MSG" == *"[Release Android]"* ]]; then WANT_ANDROID_RELEASE=1; fi
-          if [[ "$ACTUAL_COMMIT_MSG" == *"[Patch Android]"* ]]; then WANT_ANDROID_PATCH=1; fi
-          if [[ "$ACTUAL_COMMIT_MSG" == *"[Deploy Web]"* ]]; then WANT_WEB_DEPLOY=1; fi
 
-          SELECTED_COUNT=$((WANT_IOS_RELEASE + WANT_IOS_PATCH + WANT_ANDROID_RELEASE + WANT_ANDROID_PATCH + WANT_WEB_DEPLOY))
-
-          if [ "$SELECTED_COUNT" -eq 0 ]; then
-            echo "Khong co tag hop le. Khong build gi ca."
-            echo "Tag hop le: [Release iOS], [Patch iOS], [Release Android], [Patch Android], [Deploy Web]."
+          if [ "$WANT_IOS_RELEASE" -eq 0 ] && [ "$WANT_IOS_PATCH" -eq 0 ]; then
+            echo "Khong co tag iOS. Bo qua workflow iOS."
+            echo "Tag hop le cho iOS: [Release iOS] hoac [Patch iOS]."
             exit 0
+          fi
+
+          if [ $((WANT_IOS_RELEASE + WANT_IOS_PATCH)) -gt 1 ]; then
+            echo "ERROR: Chi duoc dung 1 tag iOS trong mot commit: [Release iOS] hoac [Patch iOS]."
+            exit 1
           fi
 
           require_var() {
@@ -147,20 +143,20 @@ workflows:
             keychain add-certificates --certificate "$SELECTED_CERT"
 
             echo "Lay SHA1 cua cert vua import de khoa dung signing identity..."
-            CERT_SHA1="$({
-              security find-certificate -Z -a -c "$IOS_CERT_COMMON_NAME" "$KEYCHAIN_PATH_SAFE" 2>/dev/null \
-              || security find-certificate -Z -a -c "$IOS_CERT_COMMON_NAME" 2>/dev/null \
-              || true
-            } | awk '/SHA-1 hash:/ {print $3; exit}')"
+
+            SECURITY_KEYCHAIN_ARGS=()
+            if [ -n "${KEYCHAIN_PATH_SAFE:-}" ]; then
+              SECURITY_KEYCHAIN_ARGS=("$KEYCHAIN_PATH_SAFE")
+            fi
+
+            CERT_SHA1="$(
+              security find-identity -v -p codesigning "${SECURITY_KEYCHAIN_ARGS[@]}"               | awk -v cn="$IOS_CERT_COMMON_NAME" 'index($0, "\"" cn "\"") {print $2; exit}'
+            )"
 
             if [ -z "$CERT_SHA1" ]; then
-              echo "ERROR: Khong lay duoc SHA1 cua signing certificate: $IOS_CERT_COMMON_NAME"
+              echo "ERROR: Khong lay duoc SHA1 cua signing identity: $IOS_CERT_COMMON_NAME"
               echo "Danh sach signing identities hien co:"
-              if [ -n "$KEYCHAIN_PATH_SAFE" ]; then
-                security find-identity -v -p codesigning "$KEYCHAIN_PATH_SAFE" || true
-              else
-                security find-identity -v -p codesigning || true
-              fi
+              security find-identity -v -p codesigning "${SECURITY_KEYCHAIN_ARGS[@]}" || true
               exit 1
             fi
 
@@ -180,11 +176,7 @@ workflows:
             /usr/libexec/PlistBuddy -c "Print" "$HOME/export_options.plist" || true
 
             echo "Kiem tra signing identities trong keychain..."
-            if [ -n "$KEYCHAIN_PATH_SAFE" ]; then
-              security find-identity -v -p codesigning "$KEYCHAIN_PATH_SAFE" || true
-            else
-              security find-identity -v -p codesigning || true
-            fi
+            security find-identity -v -p codesigning "${SECURITY_KEYCHAIN_ARGS[@]}" || true
           }
 
           install_shorebird() {
@@ -233,53 +225,70 @@ workflows:
             rm -rf build/ios/ipa/*.ipa || true
           }
 
-          run_android_release() {
-            echo "PHAT HIEN [Release Android] -> Dong goi ban moi Android..."
-            require_common_app_vars
-            require_shorebird_vars
-            install_shorebird
-            fetch_dependencies
-            shorebird release android \
-              --flutter-version="$FLUTTER_VERSION" \
-              --no-confirm \
-              --dart-define=GROQ_API_KEY="$GROQ_API_KEY"
-          }
-
-          run_android_patch() {
-            echo "PHAT HIEN [Patch Android] -> Tao ban va Android..."
-            require_common_app_vars
-            require_shorebird_vars
-            install_shorebird
-            fetch_dependencies
-            shorebird patch android \
-              --release-version="$ANDROID_TARGET_PATCH_VERSION" \
-              --no-confirm \
-              --dart-define=GROQ_API_KEY="$GROQ_API_KEY"
-          }
-
-          run_web_deploy() {
-            echo "PHAT HIEN [Deploy Web] -> Build Web va deploy Cloudflare Pages..."
-            require_common_app_vars
-            require_var CLOUDFLARE_API_TOKEN
-            require_var CLOUDFLARE_ACCOUNT_ID
-            require_var CLOUDFLARE_PROJECT_NAME
-
-            fetch_dependencies
-            flutter build web --release \
-              --dart-define=GROQ_API_KEY="$GROQ_API_KEY"
-
-            npx wrangler pages deploy build/web \
-              --project-name="$CLOUDFLARE_PROJECT_NAME"
-          }
-
           if [ "$WANT_IOS_RELEASE" -eq 1 ]; then run_ios_release; fi
           if [ "$WANT_IOS_PATCH" -eq 1 ]; then run_ios_patch; fi
-          if [ "$WANT_ANDROID_RELEASE" -eq 1 ]; then run_android_release; fi
-          if [ "$WANT_ANDROID_PATCH" -eq 1 ]; then run_android_patch; fi
-          if [ "$WANT_WEB_DEPLOY" -eq 1 ]; then run_web_deploy; fi
 
     artifacts:
       - build/ios/ipa/*.ipa
-      - build/app/outputs/flutter-apk/*.apk
-      - build/app/outputs/bundle/release/*.aab
+      - build/ios/archive/*.xcarchive
+
+  web-cloudflare-deploy:
+    name: 🌐 Build Web & Deploy Cloudflare Pages
+    instance_type: linux_x2
+
+    triggering:
+      events:
+        - push
+      branch_patterns:
+        - pattern: "main"
+          include: true
+      # Dat false de workflow web va iOS co the cung duoc tao tu cung mot commit.
+      cancel_previous_builds: false
+
+    environment:
+      flutter: 3.41.4
+      vars:
+        CLOUDFLARE_PROJECT_NAME: "toituhoc"
+      groups:
+        - shorebird_vars
+
+    scripts:
+      - name: 🌐 Kiem tra tag, build Web va deploy Cloudflare Pages
+        script: |
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          ACTUAL_COMMIT_MSG=$(git log -1 --pretty=%B)
+          echo "Tin nhan commit thuc te la: $ACTUAL_COMMIT_MSG"
+
+          if [[ "$ACTUAL_COMMIT_MSG" != *"[Deploy Web]"* ]]; then
+            echo "Khong co tag [Deploy Web]. Bo qua workflow Web."
+            exit 0
+          fi
+
+          require_var() {
+            local var_name="$1"
+            if [ -z "${!var_name:-}" ]; then
+              echo "ERROR: Thieu bien moi truong: $var_name"
+              exit 1
+            fi
+          }
+
+          require_var GROQ_API_KEY
+          require_var CLOUDFLARE_API_TOKEN
+          require_var CLOUDFLARE_ACCOUNT_ID
+          require_var CLOUDFLARE_PROJECT_NAME
+
+          echo "Lay dependencies Flutter..."
+          flutter pub get
+
+          echo "Build Flutter Web..."
+          flutter build web --release \
+            --dart-define=GROQ_API_KEY="$GROQ_API_KEY"
+
+          echo "Deploy len Cloudflare Pages..."
+          npx wrangler pages deploy build/web \
+            --project-name="$CLOUDFLARE_PROJECT_NAME"
+
+    artifacts:
       - build/web/**
