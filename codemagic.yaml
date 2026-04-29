@@ -14,7 +14,7 @@ workflows:
       branch_patterns:
         - pattern: "*"
           include: true
-      # SỬA LỖI TẠI ĐÂY: Thêm include: true để hết báo đỏ
+      # SỬA LỖI TẠI ĐÂY: Phải có cả pattern và include
       commit_message_patterns:
         - pattern: ".*\\[(Release|Patch) iOS\\].*"
           include: true
@@ -58,7 +58,7 @@ workflows:
             rm -f "$PROFILE_DIR"/*.mobileprovision || true
             rm -f "$CERT_DIR"/*.p12 || true
 
-            # SỬA BUNDLE ID: ve dung cua Toi Tu Hoc
+            # CẬP NHẬT: Bundle ID chuẩn của Toi Tu Hoc
             app-store-connect fetch-signing-files "vn.com.vietinbank.toituhoc" \
               --type IOS_APP_STORE \
               --create \
@@ -91,20 +91,18 @@ workflows:
             export PATH="$HOME/.shorebird/bin:$PATH"
           }
 
-          # SỬA TAG: Khop voi nut bam [Release iOS] trong VS Code
           if [[ "$ACTUAL_COMMIT_MSG" == *"[Release iOS]"* ]]; then
             setup_ios_signing
             install_shorebird
-            echo "3. Build IPA bang Shorebird..."
+            echo "3. Build IPA Release (Version + Build $BUILD_NUMBER)..."
             shorebird release ios --flutter-version=3.41.4 --no-confirm --build-number="$BUILD_NUMBER" --dart-define=GEMINI_API_KEY="$GEMINI_API_KEY" --export-options-plist="$HOME/export_options.plist"
-
           elif [[ "$ACTUAL_COMMIT_MSG" == *"[Patch iOS]"* ]]; then
             setup_ios_signing
             install_shorebird
-            echo "3. Tao Patch iOS..."
+            echo "3. Tao Patch iOS cho phien ban: $TARGET_PATCH_VERSION..."
             shorebird patch ios --release-version="$TARGET_PATCH_VERSION" --no-confirm --allow-asset-diffs --dart-define=GEMINI_API_KEY="$GEMINI_API_KEY"
           else
-            echo "Khong co tag iOS. Bo qua."
+            echo "Khong co tag iOS phù hợp. Bo qua."
           fi
 
   # ==========================================
@@ -114,7 +112,7 @@ workflows:
     name: 🌐 Build Web & Deploy Cloudflare
     instance_type: mac_mini_m2
     environment:
-      flutter: 3.41.4
+      flutter: stable
       groups:
         - shorebird_vars
     triggering:
@@ -138,5 +136,5 @@ workflows:
           flutter pub get
           flutter build web --release
 
-          # SỬA DEPLOY: Sang Cloudflare Pages (khong dung Netlify nua)
+          # CẬP NHẬT: Deploy len Cloudflare Pages thay vi Netlify
           npx wrangler pages deploy build/web --project-name="toituhoc"
