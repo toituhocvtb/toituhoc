@@ -1,6 +1,6 @@
 workflows:
   build-web-netlify:
-    name: 🌐 Build Web & Deploy Netlify
+    name: 🌐 Build Web & Deploy cloudflare
     instance_type: mac_mini_m2
     environment:
       flutter: stable
@@ -20,9 +20,9 @@ workflows:
 
           ACTUAL_COMMIT_MSG=$(git log -1 --pretty=%B)
 
-          if [[ "$ACTUAL_COMMIT_MSG" == *"[skip netlify]"* ]]; then
-            echo "Phan tich commit: Co chua tag [skip netlify]."
-            echo "=> BO QUA qua trinh build Web de tiet kiem tai nguyen Codemagic va Netlify."
+          if [[ "$ACTUAL_COMMIT_MSG" == *"[skip cloudflare]"* ]]; then
+            echo "Phan tich commit: Co chua tag [skip cloudflare]."
+            echo "=> BO QUA qua trinh build Web de tiet kiem tai nguyen Codemagic va cloudflare."
             exit 0
           fi
 
@@ -34,6 +34,7 @@ workflows:
 
           echo "Bat dau deploy len Cloudflare Pages..."
           npm install -g wrangler
+          # Thay toituhoc-web bang ten Project name CHÍNH XÁC trên Cloudflare của bạn
           npx wrangler pages deploy build/web --project-name="toituhoc-web"
 
   smart-shorebird-android:
@@ -48,7 +49,7 @@ workflows:
     environment:
       flutter: 3.41.4
       vars:
-        TARGET_PATCH_VERSION: "1.1.12+58" # Sửa lại version Android tương ứng khi cần vá
+        TARGET_PATCH_VERSION: "1.0.0+1" # Sửa lại version Android tương ứng khi cần vá
       groups:
         - shorebird_vars
     scripts:
