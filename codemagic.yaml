@@ -6,7 +6,7 @@ workflows:
     name: 🚀 / 🩹 Smart Shorebird iOS (TOI TU HOC)
     instance_type: mac_mini_m2
     integrations:
-      app_store_connect: "Elearning Phong Key" # Giữ nguyên theo Corework của bạn
+      app_store_connect: "Elearning Phong Key"
 
     triggering:
       events:
@@ -14,7 +14,7 @@ workflows:
       branch_patterns:
         - pattern: "*"
           include: true
-      # CHỈ CHẠY KHI COMMIT CÓ TAG IOS
+      # SỬA LỖI TẠI ĐÂY: Thêm include: true để hết báo đỏ
       commit_message_patterns:
         - pattern: ".*\\[(Release|Patch) iOS\\].*"
           include: true
@@ -22,7 +22,7 @@ workflows:
     environment:
       flutter: 3.41.4
       vars:
-        TARGET_PATCH_VERSION: "latest" # Tự động bắt bản build mới nhất để vá
+        TARGET_PATCH_VERSION: "latest"
       groups:
         - shorebird_vars
 
@@ -47,21 +47,18 @@ workflows:
             KEY_PEM="/tmp/ios_distribution_private.pem"
             CERT_DIR="$HOME/Library/Developer/Xcode/UserData/Certificates"
             PROFILE_DIR="$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"
-            KEYCHAIN_PATH_SAFE="${CM_KEYCHAIN_PATH:-}"
 
             export P12_PATH
             python3 -c 'import base64, os, pathlib; pathlib.Path(os.environ["P12_PATH"]).write_bytes(base64.b64decode(os.environ["IOS_DISTRIBUTION_P12_BASE64"]))'
 
-            echo "Trich private key tu p12..."
             openssl pkcs12 -in "$P12_PATH" -nocerts -nodes -passin pass:"$IOS_DISTRIBUTION_P12_PASSWORD" -out "$KEY_RAW"
             awk 'BEGIN{p=0} /-----BEGIN .*PRIVATE KEY-----/{p=1} p{print} /-----END .*PRIVATE KEY-----/{p=0}' "$KEY_RAW" > "$KEY_PEM"
 
-            echo "Don dep cache cu..."
             rm -f "$HOME/Library/MobileDevice/Provisioning Profiles/"*.mobileprovision || true
             rm -f "$PROFILE_DIR"/*.mobileprovision || true
             rm -f "$CERT_DIR"/*.p12 || true
 
-            echo "Fetch signing files cho vn.com.vietinbank.toituhoc..."
+            # SỬA BUNDLE ID: ve dung cua Toi Tu Hoc
             app-store-connect fetch-signing-files "vn.com.vietinbank.toituhoc" \
               --type IOS_APP_STORE \
               --create \
@@ -69,7 +66,6 @@ workflows:
               --strict-match-identifier \
               --certificate-key @file:"$KEY_PEM"
 
-            echo "Tim chung chi Distribution..."
             shopt -s nullglob
             MATCHED_CERTS=("$CERT_DIR"/DISTRIBUTION_*.p12)
             shopt -u nullglob
@@ -83,8 +79,7 @@ workflows:
             keychain add-certificates --certificate "$SELECTED_CERT"
 
             CERT_SHA1="$(security find-certificate -Z -a -c "Apple Distribution" | awk '/SHA-1 hash:/ {print $3; exit}')"
-            echo "Cert SHA1: $CERT_SHA1"
-
+            
             xcode-project use-profiles --project ios/Runner.xcodeproj
             /usr/libexec/PlistBuddy -c "Set :signingCertificate $CERT_SHA1" "$HOME/export_options.plist" \
               || /usr/libexec/PlistBuddy -c "Add :signingCertificate string $CERT_SHA1" "$HOME/export_options.plist"
@@ -96,11 +91,13 @@ workflows:
             export PATH="$HOME/.shorebird/bin:$PATH"
           }
 
+          # SỬA TAG: Khop voi nut bam [Release iOS] trong VS Code
           if [[ "$ACTUAL_COMMIT_MSG" == *"[Release iOS]"* ]]; then
             setup_ios_signing
             install_shorebird
-            echo "3. Build IPA Release bang Shorebird..."
+            echo "3. Build IPA bang Shorebird..."
             shorebird release ios --flutter-version=3.41.4 --no-confirm --build-number="$BUILD_NUMBER" --dart-define=GEMINI_API_KEY="$GEMINI_API_KEY" --export-options-plist="$HOME/export_options.plist"
+
           elif [[ "$ACTUAL_COMMIT_MSG" == *"[Patch iOS]"* ]]; then
             setup_ios_signing
             install_shorebird
@@ -111,56 +108,7 @@ workflows:
           fi
 
   # ==========================================
-  # 2. LUỒNG ANDROID: BUILD & PATCH (SHOREBIRD)
-  # ==========================================
-  smart-shorebird-android:
-    name: 🤖 Smart Shorebird Android (TOI TU HOC)
-    instance_type: mac_mini_m2
-    triggering:
-      events:
-        - push
-      branch_patterns:
-        - pattern: "*"
-          include: true
-      # CHỈ CHẠY KHI COMMIT CÓ TAG ANDROID
-      commit_message_patterns:
-        - pattern: ".*\\[(Release|Patch) Android\\].*"
-          include: true
-
-    environment:
-      flutter: 3.41.4
-      vars:
-        TARGET_PATCH_VERSION: "latest"
-      groups:
-        - shorebird_vars
-
-    scripts:
-      - name: 🚦 Phan loai va Thuc thi Release hoac Patch Android
-        script: |
-          #!/usr/bin/env bash
-          set -euo pipefail
-          ACTUAL_COMMIT_MSG=$(git log -1 --pretty=%B)
-
-          install_shorebird() {
-            echo "Cai dat Shorebird..."
-            curl --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/shorebirdtech/install/main/install.sh -sSf | sh
-            export PATH="$HOME/.shorebird/bin:$PATH"
-          }
-
-          if [[ "$ACTUAL_COMMIT_MSG" == *"[Release Android]"* ]]; then
-            install_shorebird
-            echo "Build APK Release + Tu dong tang Build Number ($BUILD_NUMBER)..."
-            shorebird release android --flutter-version=3.41.4 --no-confirm --artifact apk --build-number="$BUILD_NUMBER" --dart-define=GEMINI_API_KEY="$GEMINI_API_KEY"
-          elif [[ "$ACTUAL_COMMIT_MSG" == *"[Patch Android]"* ]]; then
-            install_shorebird
-            echo "Tao Patch Android..."
-            shorebird patch android --release-version="$TARGET_PATCH_VERSION" --no-confirm --dart-define=GEMINI_API_KEY="$GEMINI_API_KEY"
-          else
-            echo "Khong co tag Android. Bo qua."
-          fi
-
-  # ==========================================
-  # 3. LUỒNG WEB: BUILD & DEPLOY CLOUDFLARE
+  # 2. LUỒNG WEB: BUILD & DEPLOY CLOUDFLARE
   # ==========================================
   build-web-cloudflare:
     name: 🌐 Build Web & Deploy Cloudflare
@@ -183,14 +131,12 @@ workflows:
           ACTUAL_COMMIT_MSG=$(git log -1 --pretty=%B)
 
           if [[ "$ACTUAL_COMMIT_MSG" == *"[skip web]"* ]]; then
-            echo "=> BO QUA luong Web theo yeu cau."
+            echo "=> BO QUA luong Web."
             exit 0
           fi
 
-          echo "Build Flutter Web..."
           flutter pub get
           flutter build web --release
 
-          echo "Deploy len Cloudflare Pages..."
-          # Su dung Project Name ban da tao: toituhoc
+          # SỬA DEPLOY: Sang Cloudflare Pages (khong dung Netlify nua)
           npx wrangler pages deploy build/web --project-name="toituhoc"
