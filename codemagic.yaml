@@ -144,19 +144,20 @@ workflows:
 
             echo "Lay SHA1 cua cert vua import de khoa dung signing identity..."
 
-            SECURITY_KEYCHAIN_ARGS=()
             if [ -n "${KEYCHAIN_PATH_SAFE:-}" ]; then
-              SECURITY_KEYCHAIN_ARGS=("$KEYCHAIN_PATH_SAFE")
+              CERT_SHA1="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH_SAFE" | awk -v cn="$IOS_CERT_COMMON_NAME" 'index($0, "\"" cn "\"") {print $2; exit}')"
+            else
+              CERT_SHA1="$(security find-identity -v -p codesigning | awk -v cn="$IOS_CERT_COMMON_NAME" 'index($0, "\"" cn "\"") {print $2; exit}')"
             fi
-
-            CERT_SHA1="$(
-              security find-identity -v -p codesigning "${SECURITY_KEYCHAIN_ARGS[@]}"               | awk -v cn="$IOS_CERT_COMMON_NAME" 'index($0, "\"" cn "\"") {print $2; exit}'
-            )"
 
             if [ -z "$CERT_SHA1" ]; then
               echo "ERROR: Khong lay duoc SHA1 cua signing identity: $IOS_CERT_COMMON_NAME"
               echo "Danh sach signing identities hien co:"
-              security find-identity -v -p codesigning "${SECURITY_KEYCHAIN_ARGS[@]}" || true
+              if [ -n "${KEYCHAIN_PATH_SAFE:-}" ]; then
+                security find-identity -v -p codesigning "$KEYCHAIN_PATH_SAFE" || true
+              else
+                security find-identity -v -p codesigning || true
+              fi
               exit 1
             fi
 
@@ -176,7 +177,11 @@ workflows:
             /usr/libexec/PlistBuddy -c "Print" "$HOME/export_options.plist" || true
 
             echo "Kiem tra signing identities trong keychain..."
-            security find-identity -v -p codesigning "${SECURITY_KEYCHAIN_ARGS[@]}" || true
+            if [ -n "${KEYCHAIN_PATH_SAFE:-}" ]; then
+              security find-identity -v -p codesigning "$KEYCHAIN_PATH_SAFE" || true
+            else
+              security find-identity -v -p codesigning || true
+            fi
           }
 
           install_shorebird() {
@@ -234,7 +239,6 @@ workflows:
 
   web-cloudflare-deploy:
     name: 🌐 Build Web & Deploy Cloudflare Pages
-    instance_type: linux_x2
 
     triggering:
       events:
