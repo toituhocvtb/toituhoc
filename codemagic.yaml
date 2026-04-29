@@ -35,7 +35,7 @@ workflows:
           echo "Bat dau deploy len Cloudflare Pages..."
           npm install -g wrangler
           # Thay toituhoc-web bang ten Project name CHÍNH XÁC trên Cloudflare của bạn
-          npx wrangler pages deploy build/web --project-name="toituhoc-web"
+          npx wrangler pages deploy build/web --project-name="toituhoc"
 
   smart-shorebird-android:
     name: 🤖 Smart Shorebird Android (APK/AAB)
