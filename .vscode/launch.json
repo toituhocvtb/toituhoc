@@ -1,0 +1,28 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Toi-tu-hoc",
+            "request": "launch",
+            "type": "dart",
+            "toolArgs": [
+                "--dart-define=GROQ_API_KEY=CHIA_KHOA_GROQ"
+            ]
+        },
+        {
+            "name": "Toi-tu-hoc (profile mode)",
+            "request": "launch",
+            "type": "dart",
+            "flutterMode": "profile"
+        },
+        {
+            "name": "Toi-tu-hoc (release mode)",
+            "request": "launch",
+            "type": "dart",
+            "flutterMode": "release"
+        }
+    ]
+}
