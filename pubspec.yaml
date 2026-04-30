@@ -1,5 +1,5 @@
 name: toi_tu_hoc
-description: "A new Flutter project."
+description: "Đây là ứng dụng lưu trữ thông tin tự học được phát triển bởi Trường ĐT&PTNNL."
 # The following line prevents the package from being accidentally published to
 # pub.dev using `flutter pub publish`. This is preferred for private packages.
 publish_to: "none" # Remove this line if you wish to publish to pub.dev
@@ -50,6 +50,7 @@ dependencies:
 dev_dependencies:
   flutter_test:
     sdk: flutter
+  flutter_launcher_icons: ^0.13.1
 
   # The "flutter_lints" package below contains a set of recommended lints to
   # encourage good coding practices. The lint set provided by the package is
@@ -101,3 +102,14 @@ flutter:
   #
   # For details regarding fonts from package dependencies,
   # see https://flutter.dev/to/font-from-package
+
+flutter_launcher_icons:
+  android: true
+  ios: true
+  web:
+    generate: true
+    image_path: "assets/logo.png"
+    background_color: "#0054A6"
+    theme_color: "#0054A6"
+  image_path: "assets/app_icon.png"
+  min_sdk_android: 21

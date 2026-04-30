@@ -28,7 +28,7 @@ class ToiTuHocApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Tôi Tự Học',
+      title: 'Tôi tự học',
       debugShowCheckedModeBanner: false,
       // Bắt đầu cấu hình ngôn ngữ
       localizationsDelegates: const [

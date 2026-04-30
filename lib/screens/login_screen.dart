@@ -78,13 +78,14 @@ class _LoginScreenState extends State<LoginScreen> {
       String emailInput = _emailController.text.trim();
       final password = _passwordController.text.trim();
 
-      // 1. Bẫy lỗi: Cảnh báo nếu người dùng gõ sai viettinbank (2 chữ t)
-      if (emailInput.toLowerCase().contains('@viettinbank.vn')) {
+      // 1. Bẫy lỗi: Cảnh báo nếu người dùng gõ tên miền khác @vietinbank.vn
+      if (emailInput.contains('@') &&
+          !emailInput.toLowerCase().endsWith('@vietinbank.vn')) {
         if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text(
-              'Bạn đang gõ sai địa chỉ email (@viettinbank.vn). Vui lòng nhập lại chính xác!',
+              'Chỉ hỗ trợ email đuôi @vietinbank.vn hoặc User AD. Vui lòng nhập lại chính xác!',
             ),
             backgroundColor: Colors.red,
           ),
