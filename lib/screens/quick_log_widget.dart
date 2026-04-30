@@ -371,7 +371,7 @@ class _QuickLogWidgetState extends State<QuickLogWidget> {
                               decoration: InputDecoration(
                                 labelText: 'Chặng/Đợt kê khai',
                                 contentPadding: const EdgeInsets.symmetric(
-                                  horizontal: 12,
+                                  horizontal: 8,
                                   vertical: 8,
                                 ),
                                 border: OutlineInputBorder(
@@ -379,11 +379,22 @@ class _QuickLogWidgetState extends State<QuickLogWidget> {
                                 ),
                               ),
                               items: _phaseList.map((String phase) {
+                                // Tự động ngắt dòng trước dấu "(" để tách tên chặng và thời gian
+                                String displayText = phase.replaceFirst(
+                                  ' (',
+                                  '\n(',
+                                );
                                 return DropdownMenuItem<String>(
                                   value: phase,
                                   child: Text(
-                                    phase,
+                                    displayText,
+                                    maxLines: 2,
                                     overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(
+                                      fontSize:
+                                          11, // Cỡ chữ nhỏ lại để vừa khít 2 dòng
+                                      height: 1.2,
+                                    ),
                                   ),
                                 );
                               }).toList(),
@@ -496,7 +507,7 @@ class _QuickLogWidgetState extends State<QuickLogWidget> {
                                         },
                                         child: Container(
                                           padding: const EdgeInsets.symmetric(
-                                            horizontal: 8,
+                                            horizontal: 4,
                                             vertical: 12,
                                           ),
                                           decoration: BoxDecoration(
@@ -507,23 +518,14 @@ class _QuickLogWidgetState extends State<QuickLogWidget> {
                                               8,
                                             ),
                                           ),
-                                          child: Row(
-                                            mainAxisAlignment:
-                                                MainAxisAlignment.spaceBetween,
-                                            children: [
-                                              Text(
-                                                '${_completionDate.day}/${_completionDate.month}/${_completionDate.year}',
-                                                style: const TextStyle(
-                                                  fontSize: 13,
-                                                  fontWeight: FontWeight.w500,
-                                                ),
+                                          child: Center(
+                                            child: Text(
+                                              '${_completionDate.day}/${_completionDate.month}/${_completionDate.year}',
+                                              style: const TextStyle(
+                                                fontSize: 12,
+                                                fontWeight: FontWeight.w600,
                                               ),
-                                              const Icon(
-                                                Icons.calendar_today,
-                                                size: 14,
-                                                color: Colors.blue,
-                                              ),
-                                            ],
+                                            ),
                                           ),
                                         ),
                                       ),
@@ -578,7 +580,7 @@ class _QuickLogWidgetState extends State<QuickLogWidget> {
                                         },
                                         child: Container(
                                           padding: const EdgeInsets.symmetric(
-                                            horizontal: 8,
+                                            horizontal: 4,
                                             vertical: 12,
                                           ),
                                           decoration: BoxDecoration(
@@ -589,23 +591,14 @@ class _QuickLogWidgetState extends State<QuickLogWidget> {
                                               8,
                                             ),
                                           ),
-                                          child: Row(
-                                            mainAxisAlignment:
-                                                MainAxisAlignment.spaceBetween,
-                                            children: [
-                                              Text(
-                                                '${_completionDate.hour.toString().padLeft(2, '0')}:${_completionDate.minute.toString().padLeft(2, '0')}',
-                                                style: const TextStyle(
-                                                  fontSize: 13,
-                                                  fontWeight: FontWeight.w500,
-                                                ),
+                                          child: Center(
+                                            child: Text(
+                                              '${_completionDate.hour.toString().padLeft(2, '0')}:${_completionDate.minute.toString().padLeft(2, '0')}',
+                                              style: const TextStyle(
+                                                fontSize: 12,
+                                                fontWeight: FontWeight.w600,
                                               ),
-                                              const Icon(
-                                                Icons.access_time,
-                                                size: 14,
-                                                color: Colors.orange,
-                                              ),
-                                            ],
+                                            ),
                                           ),
                                         ),
                                       ),

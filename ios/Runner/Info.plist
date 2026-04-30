@@ -51,5 +51,7 @@
 	<string>Ứng dụng cần quyền truy cập thư viện ảnh để cập nhật Avatar và minh chứng.</string>
 	<key>NSCameraUsageDescription</key>
 	<string>Ứng dụng cần quyền truy cập camera để chụp ảnh.</string>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 </dict>
 </plist>

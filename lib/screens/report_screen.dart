@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:file_picker/file_picker.dart';
@@ -14,6 +15,7 @@ class ReportScreen extends StatefulWidget {
 class _ReportScreenState extends State<ReportScreen> {
   bool _isLoading = true;
   bool _isAdmin = false;
+  bool _isFocalPoint = false;
   String _userId = '';
   String _userRole = 'tsc';
   String _userDivision = '';
@@ -72,6 +74,19 @@ class _ReportScreenState extends State<ReportScreen> {
         _userDivision = profile['division'] ?? '';
         _userDeptId = profile['department_id'];
         _isAdmin = profile['is_admin'] == true;
+
+        // Kiểm tra xem user hiện tại có đích danh là đầu mối (level2_user_id) của phòng này không
+        if (_userDeptId != null) {
+          final deptInfo = await Supabase.instance.client
+              .from('departments')
+              .select('level2_user_id')
+              .eq('id', _userDeptId!)
+              .maybeSingle();
+
+          if (deptInfo != null && deptInfo['level2_user_id'] == _userId) {
+            _isFocalPoint = true;
+          }
+        }
       }
 
       // 2. Tải danh sách Đợt/Chặng (Lọc theo Role nếu không phải Admin)
@@ -536,6 +551,22 @@ class _ReportScreenState extends State<ReportScreen> {
     Map<String, dynamic>? specificUser,
     bool isHRReport = true,
   }) async {
+    // Chặn xuất báo cáo trên Mobile, chỉ cho phép trên Web
+    if (!kIsWeb) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Tính năng xuất báo cáo Excel hiện chỉ hỗ trợ trên phiên bản Web (Máy tính).',
+            ),
+            backgroundColor: Colors.orange,
+            duration: Duration(seconds: 4),
+          ),
+        );
+      }
+      return;
+    }
+
     try {
       var excel = Excel.createExcel();
       List<dynamic> exportList = [];
@@ -693,8 +724,8 @@ class _ReportScreenState extends State<ReportScreen> {
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
 
-    // Kiểm tra xem người dùng có quyền xuất báo cáo không (Admin hoặc Đầu mối có mã phòng)
-    bool canExport = _isAdmin || _userDeptId != null;
+    // Kiểm tra xem người dùng có quyền xuất báo cáo không (Admin hoặc đích danh Đầu mối)
+    bool canExport = _isAdmin || _isFocalPoint;
 
     return DefaultTabController(
       length: canExport ? 3 : 2,
