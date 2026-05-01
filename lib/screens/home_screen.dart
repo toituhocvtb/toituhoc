@@ -66,8 +66,24 @@ class _HomeScreenState extends State<HomeScreen> {
       List<Map<String, dynamic>> validPeriods = [];
 
       for (var p in periodsRes) {
-        validPeriods.add(p); // Luôn nạp chặng vào danh sách
-        final eDate = DateTime.tryParse(p['end_date'] ?? '');
+        // Tự động format tên chặng kèm thời gian thực tế từ DB
+        Map<String, dynamic> period = Map<String, dynamic>.from(p);
+        String rawName = period['period_name'] ?? '';
+        // Cắt bỏ phần text (ngày/tháng) cũ nếu Admin có lỡ nhập tay
+        String baseName = rawName.replaceAll(RegExp(r'\s*\(.*?\)'), '').trim();
+
+        DateTime? sDate = DateTime.tryParse(period['start_date'] ?? '');
+        DateTime? eDate = DateTime.tryParse(period['end_date'] ?? '');
+
+        if (sDate != null && eDate != null) {
+          period['period_name'] =
+              '$baseName (${sDate.day}/${sDate.month} - ${eDate.day}/${eDate.month})';
+        } else {
+          period['period_name'] = baseName;
+        }
+
+        validPeriods.add(period); // Luôn nạp chặng vào danh sách
+
         // Logic chặn Dropdown: Nếu ngày kết thúc của chặng này từ hôm nay trở đi
         // (nghĩa là chặng này đang diễn ra hoặc là chặng tương lai gần nhất),
         // thì lập tức DỪNG vòng lặp, không hiển thị các chặng xa hơn nữa.

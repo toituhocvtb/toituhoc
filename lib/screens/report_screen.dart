@@ -41,7 +41,8 @@ class _ReportScreenState extends State<ReportScreen> {
   bool _isLoadingHistory = true;
 
   // Dữ liệu hiển thị
-  List<Map<String, dynamic>> _allRawData = [];
+  List<Map<String, dynamic>> _allRawData = []; // Dữ liệu hiển thị
+  List<dynamic> _periodsConfig = []; // Cấu hình các chặng để gom nhóm lịch sử
   List<Map<String, dynamic>> _top5List = [];
   Map<String, dynamic>? _myRankData;
 
@@ -100,6 +101,8 @@ class _ReportScreenState extends State<ReportScreen> {
       }
 
       final periodsRes = await query.order('start_date', ascending: true);
+      _periodsConfig =
+          periodsRes; // Lưu lại để dùng cho việc phân nhóm danh sách
       List<String> fetchedPeriods = [];
       String? activePeriodName;
       final now = DateTime.now();
@@ -169,7 +172,7 @@ class _ReportScreenState extends State<ReportScreen> {
       try {
         final hoursRes = await Supabase.instance.client
             .from('learning_hours')
-            .select('course_name, duration_minutes, platform, created_at')
+            .select('id, course_name, duration_minutes, platform, created_at')
             .eq('user_id', userId)
             .order('created_at', ascending: false);
         _learningHistory = hoursRes;
@@ -718,6 +721,62 @@ class _ReportScreenState extends State<ReportScreen> {
     }
   }
 
+  Future<void> _deleteLearningRecord(String recordId, String courseName) async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Xác nhận xóa'),
+        content: Text(
+          'Bạn có chắc chắn muốn xóa khóa học "$courseName" không?\nDữ liệu sau khi xóa sẽ bị trừ khỏi bảng xếp hạng và không thể khôi phục.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Hủy', style: TextStyle(color: Colors.grey)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text(
+              'Xóa',
+              style: TextStyle(color: Colors.red, fontWeight: FontWeight.bold),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm != true) return;
+
+    setState(() => _isLoadingHistory = true);
+    try {
+      await Supabase.instance.client
+          .from('learning_hours')
+          .delete()
+          .eq('id', recordId);
+
+      // Xóa thành công thì tải lại toàn bộ Data để Cập nhật BXH và Lịch sử
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Đã xóa khóa học thành công'),
+            backgroundColor: Colors.green,
+          ),
+        );
+        _fetchInitialData();
+      }
+    } catch (e) {
+      setState(() => _isLoadingHistory = false);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Lỗi khi xóa: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_isLoading) {
@@ -813,44 +872,181 @@ class _ReportScreenState extends State<ReportScreen> {
                                   style: TextStyle(color: Colors.grey),
                                 ),
                               )
-                            : ListView.builder(
-                                padding: const EdgeInsets.symmetric(
-                                  vertical: 8,
-                                ),
-                                itemCount: _learningHistory.length,
-                                itemBuilder: (context, index) {
-                                  final item = _learningHistory[index];
-                                  return Card(
-                                    margin: const EdgeInsets.symmetric(
-                                      horizontal: 16,
-                                      vertical: 6,
+                            : Builder(
+                                builder: (context) {
+                                  // 1. Phân nhóm dữ liệu theo chặng
+                                  Map<String, List<dynamic>> groupedItems = {};
+                                  String activePeriodName = "";
+
+                                  for (var item in _learningHistory) {
+                                    DateTime? date = DateTime.tryParse(
+                                      item['created_at'] ?? '',
+                                    );
+                                    String periodName =
+                                        "Khác (Ngoài thời gian thi đua)";
+
+                                    if (date != null &&
+                                        _periodsConfig.isNotEmpty) {
+                                      for (var p in _periodsConfig) {
+                                        DateTime? sDate = DateTime.tryParse(
+                                          p['start_date'] ?? '',
+                                        );
+                                        DateTime? eDate = DateTime.tryParse(
+                                          p['end_date'] ?? '',
+                                        );
+
+                                        if (sDate != null && eDate != null) {
+                                          if (date.isAfter(
+                                                sDate.subtract(
+                                                  const Duration(days: 1),
+                                                ),
+                                              ) &&
+                                              date.isBefore(
+                                                eDate.add(
+                                                  const Duration(days: 1),
+                                                ),
+                                              )) {
+                                            String pName = p['period_name'];
+                                            if (p['is_active'] == true) {
+                                              pName = '$pName (Đang Active)';
+                                              activePeriodName = pName;
+                                            }
+                                            periodName = pName;
+                                            break;
+                                          }
+                                        }
+                                      }
+                                    }
+                                    groupedItems
+                                        .putIfAbsent(periodName, () => [])
+                                        .add(item);
+                                  }
+
+                                  // 2. Sắp xếp: Ưu tiên chặng Active lên đỉnh
+                                  List<String> sortedKeys = groupedItems.keys
+                                      .toList();
+                                  sortedKeys.sort((a, b) {
+                                    if (a == activePeriodName) return -1;
+                                    if (b == activePeriodName) return 1;
+                                    return b.compareTo(
+                                      a,
+                                    ); // Các chặng khác sắp xếp giảm dần
+                                  });
+
+                                  // 3. Render giao diện có khả năng Expand/Collapse
+                                  return ListView.builder(
+                                    padding: const EdgeInsets.symmetric(
+                                      vertical: 8,
                                     ),
-                                    child: ListTile(
-                                      leading: const CircleAvatar(
-                                        backgroundColor: Colors.green,
-                                        child: Icon(
-                                          Icons.timer,
-                                          color: Colors.white,
+                                    itemCount: sortedKeys.length,
+                                    itemBuilder: (context, index) {
+                                      String currentPeriod = sortedKeys[index];
+                                      List<dynamic> periodCourses =
+                                          groupedItems[currentPeriod]!;
+                                      bool isActivePeriod =
+                                          currentPeriod == activePeriodName;
+
+                                      return Theme(
+                                        data: Theme.of(context).copyWith(
+                                          dividerColor: Colors.transparent,
                                         ),
-                                      ),
-                                      title: Text(
-                                        item['course_name'] ?? '',
-                                        style: const TextStyle(
-                                          fontWeight: FontWeight.bold,
+                                        child: ExpansionTile(
+                                          initiallyExpanded:
+                                              isActivePeriod, // Tự động mở sổ chặng đang Active
+                                          title: Text(
+                                            currentPeriod,
+                                            style: TextStyle(
+                                              fontWeight: FontWeight.bold,
+                                              fontSize: 15,
+                                              color: isActivePeriod
+                                                  ? Colors.blue.shade800
+                                                  : Colors.black87,
+                                            ),
+                                          ),
+                                          subtitle: Text(
+                                            '${periodCourses.length} khóa học đã khai',
+                                          ),
+                                          leading: Icon(
+                                            isActivePeriod
+                                                ? Icons.local_fire_department
+                                                : Icons.folder_copy,
+                                            color: isActivePeriod
+                                                ? Colors.orange
+                                                : Colors.grey,
+                                          ),
+                                          children: periodCourses.map((item) {
+                                            return Card(
+                                              margin:
+                                                  const EdgeInsets.symmetric(
+                                                    horizontal: 16,
+                                                    vertical: 4,
+                                                  ),
+                                              elevation: 1,
+                                              color: Colors.white,
+                                              child: ListTile(
+                                                contentPadding:
+                                                    const EdgeInsets.only(
+                                                      left: 16,
+                                                      right: 8,
+                                                    ),
+                                                leading: const CircleAvatar(
+                                                  backgroundColor: Colors.green,
+                                                  radius: 18,
+                                                  child: Icon(
+                                                    Icons.timer,
+                                                    color: Colors.white,
+                                                    size: 18,
+                                                  ),
+                                                ),
+                                                title: Text(
+                                                  item['course_name'] ?? '',
+                                                  style: const TextStyle(
+                                                    fontWeight: FontWeight.bold,
+                                                    fontSize: 14,
+                                                  ),
+                                                ),
+                                                subtitle: Text(
+                                                  '${item['platform']} • ${_formatDate(item['created_at'])}',
+                                                  style: const TextStyle(
+                                                    fontSize: 12,
+                                                  ),
+                                                ),
+                                                trailing: Row(
+                                                  mainAxisSize:
+                                                      MainAxisSize.min,
+                                                  children: [
+                                                    Text(
+                                                      '+${item['duration_minutes']}p',
+                                                      style: const TextStyle(
+                                                        fontWeight:
+                                                            FontWeight.bold,
+                                                        color: Colors.green,
+                                                        fontSize: 15,
+                                                      ),
+                                                    ),
+                                                    IconButton(
+                                                      icon: const Icon(
+                                                        Icons.delete_outline,
+                                                        color: Colors.redAccent,
+                                                        size: 22,
+                                                      ),
+                                                      tooltip: 'Xóa',
+                                                      onPressed: () =>
+                                                          _deleteLearningRecord(
+                                                            item['id']
+                                                                .toString(),
+                                                            item['course_name'] ??
+                                                                '',
+                                                          ),
+                                                    ),
+                                                  ],
+                                                ),
+                                              ),
+                                            );
+                                          }).toList(),
                                         ),
-                                      ),
-                                      subtitle: Text(
-                                        '${item['platform']} • ${_formatDate(item['created_at'])}',
-                                      ),
-                                      trailing: Text(
-                                        '+${item['duration_minutes']}p',
-                                        style: const TextStyle(
-                                          fontWeight: FontWeight.bold,
-                                          color: Colors.green,
-                                          fontSize: 16,
-                                        ),
-                                      ),
-                                    ),
+                                      );
+                                    },
                                   );
                                 },
                               ))

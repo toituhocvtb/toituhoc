@@ -1,7 +1,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET"/>
     <application
-        android:label="toi_tu_hoc"
+        android:label="Tôi tự học"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity

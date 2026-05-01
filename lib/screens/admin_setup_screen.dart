@@ -12,12 +12,35 @@ class _AdminSetupScreenState extends State<AdminSetupScreen> {
   List<dynamic> _periods = [];
   bool _isLoading = true;
   final Map<String, int> _points = {}; // Lưu điểm trực tiếp
+  final Map<String, int> _configs = {}; // Lưu cấu hình số lượng ảnh
+  final Map<String, String> _configNames = {}; // Lưu tên cấu hình
 
   @override
   void initState() {
     super.initState();
     _fetchPeriods();
     _fetchPoints(); // Gọi thêm hàm tải điểm
+    _fetchConfigs(); // Gọi thêm hàm tải cấu hình ảnh
+  }
+
+  // Tải cấu hình số lượng ảnh từ Database
+  Future<void> _fetchConfigs() async {
+    try {
+      final res = await Supabase.instance.client
+          .from('system_configs')
+          .select()
+          .order('config_name');
+      if (mounted) {
+        setState(() {
+          for (var row in res) {
+            _configs[row['config_key']] = row['config_value'] as int;
+            _configNames[row['config_key']] = row['config_name'] as String;
+          }
+        });
+      }
+    } catch (e) {
+      debugPrint('Lỗi tải cấu hình hệ thống: $e');
+    }
   }
 
   // Tải cấu hình điểm từ Database để hiển thị ra 2 thẻ
@@ -112,6 +135,58 @@ class _AdminSetupScreenState extends State<AdminSetupScreen> {
       debugPrint('Lỗi tải danh sách Đợt: $e');
       if (mounted) setState(() => _isLoading = false);
     }
+  }
+
+  // Popup cảnh báo giải thích rõ UX cho Admin trước khi thực hiện
+  void _confirmToggleActive(Map<String, dynamic> item, bool currentValue) {
+    final isTurningOn = !currentValue;
+    final roleName = item['target_role'].toString().toUpperCase();
+    final title = isTurningOn
+        ? 'Kích hoạt Chặng/Đợt thi đua'
+        : 'Tắt Chặng/Đợt thi đua';
+    final content = isTurningOn
+        ? 'Bật chặng này sẽ thiết lập nó làm MẶC ĐỊNH cho Bảng xếp hạng và Báo cáo.\n\n⚠️ ĐỒNG THỜI, hệ thống sẽ tự động TẮT các chặng khác của khối $roleName để chốt sổ điểm số. Bạn có chắc chắn muốn bật?'
+        : 'Tắt chặng này sẽ khiến BXH và Báo cáo không còn chặng nào đang diễn ra. Bạn có chắc chắn muốn tắt?';
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(
+          title,
+          style: TextStyle(
+            color: isTurningOn ? Colors.green.shade700 : Colors.red.shade700,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        content: Text(content, style: const TextStyle(height: 1.4)),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Hủy', style: TextStyle(color: Colors.grey)),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              Navigator.pop(ctx);
+              _toggleActive(
+                item['id'],
+                currentValue,
+                item['target_role'],
+              ); // Gọi hàm lưu thật sau khi xác nhận
+            },
+            style: ElevatedButton.styleFrom(
+              backgroundColor: isTurningOn ? Colors.green : Colors.red,
+            ),
+            child: Text(
+              isTurningOn ? 'Đồng ý Bật' : 'Đồng ý Tắt',
+              style: const TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _toggleActive(String id, bool currentValue, String role) async {
@@ -604,6 +679,85 @@ class _AdminSetupScreenState extends State<AdminSetupScreen> {
     );
   }
 
+  // Hiển thị dialog để sửa cấu hình số lượng ảnh
+  Future<void> _showEditConfigsDialog() async {
+    List<String> keys = _configs.keys.toList();
+    List<TextEditingController> controllers = keys.map((k) {
+      return TextEditingController(text: _configs[k].toString());
+    }).toList();
+
+    if (!mounted) return;
+    showDialog(
+      context: context,
+      builder: (ctx) {
+        return AlertDialog(
+          title: const Text('Cấu hình Số lượng ảnh tối đa'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: List.generate(keys.length, (index) {
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 12.0),
+                  child: TextField(
+                    controller: controllers[index],
+                    decoration: InputDecoration(
+                      labelText: _configNames[keys[index]],
+                      border: const OutlineInputBorder(),
+                    ),
+                    keyboardType: TextInputType.number,
+                  ),
+                );
+              }),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Hủy'),
+            ),
+            ElevatedButton(
+              onPressed: () async {
+                Navigator.pop(ctx);
+                try {
+                  List<Map<String, dynamic>> updates = [];
+                  for (int i = 0; i < keys.length; i++) {
+                    updates.add({
+                      'config_key': keys[i],
+                      'config_value': int.tryParse(controllers[i].text) ?? 1,
+                    });
+                  }
+
+                  await Supabase.instance.client
+                      .from('system_configs')
+                      .upsert(updates);
+
+                  await _fetchConfigs(); // Làm mới thẻ cấu hình
+
+                  if (!mounted) return;
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text('Lưu cấu hình ảnh thành công!'),
+                      backgroundColor: Colors.green,
+                    ),
+                  );
+                } catch (e) {
+                  if (!mounted) return;
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text('Lỗi cập nhật: $e'),
+                      backgroundColor: Colors.red,
+                    ),
+                  );
+                }
+              },
+              child: const Text('Lưu thay đổi'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -611,183 +765,275 @@ class _AdminSetupScreenState extends State<AdminSetupScreen> {
         title: const Text('Cài đặt Chặng / Đợt thi đua'),
         backgroundColor: Colors.blueGrey,
       ),
-      body: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Tiêu đề 1
-          const Padding(
-            padding: EdgeInsets.fromLTRB(16, 16, 16, 4),
-            child: Text(
-              'Cấu hình điểm Gamification',
-              style: TextStyle(
-                fontSize: 18,
-                fontWeight: FontWeight.bold,
-                color: Colors.blueGrey,
+      // Bọc SingleChildScrollView để toàn bộ màn hình có thể cuộn lên
+      body: SingleChildScrollView(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Tiêu đề 1
+            const Padding(
+              padding: EdgeInsets.fromLTRB(16, 16, 16, 4),
+              child: Text(
+                'Cấu hình điểm Gamification',
+                style: TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.blueGrey,
+                ),
               ),
             ),
-          ),
-          // 2 Thẻ (Cards) hiển thị trực tiếp cấu hình điểm
-          Padding(
-            padding: const EdgeInsets.symmetric(
-              horizontal: 12.0,
-              vertical: 8.0,
-            ),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Expanded(
-                  child: Card(
-                    elevation: 2,
-                    color: Colors.purple.shade50,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      side: BorderSide(color: Colors.purple.shade200, width: 1),
-                    ),
-                    child: Padding(
-                      padding: const EdgeInsets.all(12.0),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                            children: [
-                              const Text(
-                                'Điểm KNS',
-                                style: TextStyle(
-                                  fontWeight: FontWeight.bold,
-                                  color: Colors.purple,
-                                  fontSize: 16,
-                                ),
-                              ),
-                              Tooltip(
-                                message: 'Chỉnh sửa điểm',
-                                child: InkWell(
-                                  onTap: _showEditPointsDialog,
-                                  child: const Icon(
-                                    Icons.edit_square,
+            // 2 Thẻ (Cards) hiển thị trực tiếp cấu hình điểm
+            Padding(
+              padding: const EdgeInsets.symmetric(
+                horizontal: 12.0,
+                vertical: 8.0,
+              ),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: Card(
+                      elevation: 2,
+                      color: Colors.purple.shade50,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        side: BorderSide(
+                          color: Colors.purple.shade200,
+                          width: 1,
+                        ),
+                      ),
+                      child: Padding(
+                        padding: const EdgeInsets.all(12.0),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                const Text(
+                                  'Điểm KNS',
+                                  style: TextStyle(
+                                    fontWeight: FontWeight.bold,
                                     color: Colors.purple,
-                                    size: 20,
+                                    fontSize: 16,
                                   ),
                                 ),
-                              ),
-                            ],
-                          ),
-                          const Divider(color: Colors.purple),
-                          Text(
-                            '• AI Tối đa: ${_points['kns_max_ai'] ?? '...'} đ',
-                          ),
-                          Text(
-                            '• Chia sẻ Group: ${_points['share_group'] ?? '...'} đ',
-                          ),
-                          Text(
-                            '• Coffee Talk: ${_points['coffee_talk'] ?? '...'} đ',
-                          ),
-                          Text('• Diễn giả: ${_points['speaker'] ?? '...'} đ'),
-                        ],
+                                Tooltip(
+                                  message: 'Chỉnh sửa điểm',
+                                  child: InkWell(
+                                    onTap: _showEditPointsDialog,
+                                    child: const Icon(
+                                      Icons.edit_square,
+                                      color: Colors.purple,
+                                      size: 20,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const Divider(color: Colors.purple),
+                            Text(
+                              '• AI Tối đa: ${_points['kns_max_ai'] ?? '...'} đ',
+                            ),
+                            Text(
+                              '• Chia sẻ Group: ${_points['share_group'] ?? '...'} đ',
+                            ),
+                            Text(
+                              '• Coffee Talk: ${_points['coffee_talk'] ?? '...'} đ',
+                            ),
+                            Text(
+                              '• Diễn giả: ${_points['speaker'] ?? '...'} đ',
+                            ),
+                          ],
+                        ),
                       ),
                     ),
                   ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Card(
-                    elevation: 2,
-                    color: Colors.blue.shade50,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      side: BorderSide(color: Colors.blue.shade200, width: 1),
-                    ),
-                    child: Padding(
-                      padding: const EdgeInsets.all(12.0),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                            children: [
-                              const Text(
-                                'Điểm TSC',
-                                style: TextStyle(
-                                  fontWeight: FontWeight.bold,
-                                  color: Colors.blue,
-                                  fontSize: 16,
-                                ),
-                              ),
-                              Tooltip(
-                                message: 'Chỉnh sửa điểm',
-                                child: InkWell(
-                                  onTap: _showEditPointsDialog,
-                                  child: const Icon(
-                                    Icons.edit_square,
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Card(
+                      elevation: 2,
+                      color: Colors.blue.shade50,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        side: BorderSide(color: Colors.blue.shade200, width: 1),
+                      ),
+                      child: Padding(
+                        padding: const EdgeInsets.all(12.0),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                const Text(
+                                  'Điểm TSC',
+                                  style: TextStyle(
+                                    fontWeight: FontWeight.bold,
                                     color: Colors.blue,
-                                    size: 20,
+                                    fontSize: 16,
                                   ),
                                 ),
+                                Tooltip(
+                                  message: 'Chỉnh sửa điểm',
+                                  child: InkWell(
+                                    onTap: _showEditPointsDialog,
+                                    child: const Icon(
+                                      Icons.edit_square,
+                                      color: Colors.blue,
+                                      size: 20,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const Divider(color: Colors.blue),
+                            Text(
+                              '• AI Tối đa: ${_points['tsc_max_ai'] ?? '...'} đ',
+                            ),
+                            const SizedBox(height: 4),
+                            const Text(
+                              '• Không áp dụng tiêu chí phụ',
+                              style: TextStyle(
+                                color: Colors.grey,
+                                fontStyle: FontStyle.italic,
                               ),
-                            ],
-                          ),
-                          const Divider(color: Colors.blue),
-                          Text(
-                            '• AI Tối đa: ${_points['tsc_max_ai'] ?? '...'} đ',
-                          ),
-                          const SizedBox(height: 4),
+                            ),
+                            const SizedBox(height: 36),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+
+            // Thẻ (Card) hiển thị trực tiếp cấu hình Số lượng ảnh
+            const Padding(
+              padding: EdgeInsets.fromLTRB(16, 16, 16, 4),
+              child: Text(
+                'Cấu hình Giới hạn ảnh minh chứng',
+                style: TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.blueGrey,
+                ),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.symmetric(
+                horizontal: 12.0,
+                vertical: 8.0,
+              ),
+              child: Card(
+                elevation: 2,
+                color: Colors.orange.shade50,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  side: BorderSide(color: Colors.orange.shade200, width: 1),
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.all(12.0),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
                           const Text(
-                            '• Không áp dụng tiêu chí phụ',
+                            'Số lượng ảnh tối đa cho phép',
                             style: TextStyle(
-                              color: Colors.grey,
-                              fontStyle: FontStyle.italic,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.deepOrange,
+                              fontSize: 16,
                             ),
                           ),
-                          const SizedBox(height: 36),
+                          Tooltip(
+                            message: 'Chỉnh sửa giới hạn ảnh',
+                            child: InkWell(
+                              onTap: _showEditConfigsDialog,
+                              child: const Icon(
+                                Icons.edit_square,
+                                color: Colors.deepOrange,
+                                size: 20,
+                              ),
+                            ),
+                          ),
                         ],
+                      ),
+                      const Divider(color: Colors.orange),
+                      ..._configs.keys.map(
+                        (key) => Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 3.0),
+                          child: Text(
+                            '• ${_configNames[key] ?? key}: ${_configs[key] ?? '...'} ảnh',
+                            style: const TextStyle(fontSize: 14),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+
+            // Tiêu đề 2 và Nút Thêm mới
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  const Expanded(
+                    child: Text(
+                      'Cài đặt chặng thi đua',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.blueGrey,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  ElevatedButton.icon(
+                    onPressed: _showAddDialog,
+                    icon: const Icon(Icons.add, size: 18),
+                    label: const Text('Thêm mới'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.blueGrey,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 8,
                       ),
                     ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
-          ),
 
-          // Tiêu đề 2 và Nút Thêm mới
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                const Text(
-                  'Cài đặt các Chặng / Đợt thi đua',
-                  style: TextStyle(
-                    fontSize: 18,
-                    fontWeight: FontWeight.bold,
-                    color: Colors.blueGrey,
-                  ),
-                ),
-                ElevatedButton.icon(
-                  onPressed: _showAddDialog,
-                  icon: const Icon(Icons.add, size: 18),
-                  label: const Text('Thêm mới'),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.blueGrey,
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 8,
+            // Khu vực hiển thị danh sách
+            _isLoading
+                ? const Center(
+                    child: Padding(
+                      padding: EdgeInsets.all(16.0),
+                      child: CircularProgressIndicator(),
                     ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-
-          // Khu vực hiển thị danh sách
-          Expanded(
-            child: _isLoading
-                ? const Center(child: CircularProgressIndicator())
+                  )
                 : _periods.isEmpty
                 ? const Center(
-                    child: Text('Chưa có cấu hình nào. Hãy thêm mới!'),
+                    child: Padding(
+                      padding: EdgeInsets.all(16.0),
+                      child: Text('Chưa có cấu hình nào. Hãy thêm mới!'),
+                    ),
                   )
                 : ListView.builder(
+                    shrinkWrap:
+                        true, // Ép ListView nằm gọn trong SingleChildScrollView
+                    physics:
+                        const NeverScrollableScrollPhysics(), // Tắt cuộn của ListView
                     padding: const EdgeInsets.symmetric(horizontal: 12.0),
                     itemCount: _periods.length,
                     itemBuilder: (context, index) {
@@ -809,6 +1055,18 @@ class _AdminSetupScreenState extends State<AdminSetupScreen> {
                       // Báo động đỏ: Đang bật (Active) nhưng Đã hết hạn (Expired)
                       final isAlert = isActive && isExpired;
 
+                      // Xử lý chuỗi ngày tháng sang định dạng dd/mm/yy
+                      String startFmt = item['start_date'];
+                      String endFmt = item['end_date'];
+                      try {
+                        final dStart = DateTime.parse(item['start_date']);
+                        startFmt =
+                            '${dStart.day.toString().padLeft(2, '0')}/${dStart.month.toString().padLeft(2, '0')}/${dStart.year.toString().substring(2)}';
+                        final dEnd = DateTime.parse(item['end_date']);
+                        endFmt =
+                            '${dEnd.day.toString().padLeft(2, '0')}/${dEnd.month.toString().padLeft(2, '0')}/${dEnd.year.toString().substring(2)}';
+                      } catch (_) {}
+
                       return Card(
                         elevation: isAlert ? 4 : 1,
                         shape: isAlert
@@ -826,6 +1084,10 @@ class _AdminSetupScreenState extends State<AdminSetupScreen> {
                                   .shade50 // Nền đỏ nhạt
                             : (isActive ? Colors.blue.shade50 : Colors.white),
                         child: ListTile(
+                          contentPadding: const EdgeInsets.symmetric(
+                            horizontal: 12.0,
+                            vertical: 4.0,
+                          ),
                           leading: CircleAvatar(
                             backgroundColor: isAlert
                                 ? Colors.red
@@ -840,7 +1102,7 @@ class _AdminSetupScreenState extends State<AdminSetupScreen> {
                             ),
                           ),
                           title: Text(
-                            item['period_name'],
+                            item['period_name'], // Hiện chặng mấy ở dòng trên cùng
                             style: TextStyle(
                               fontWeight: isActive
                                   ? FontWeight.bold
@@ -855,9 +1117,9 @@ class _AdminSetupScreenState extends State<AdminSetupScreen> {
                           subtitle: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              Text(
-                                'Từ: ${item['start_date']} đến ${item['end_date']}',
-                              ),
+                              const SizedBox(height: 4),
+                              Text('Từ: $startFmt'),
+                              Text('Đến: $endFmt'),
                               if (isAlert)
                                 const Padding(
                                   padding: EdgeInsets.only(top: 4.0),
@@ -872,69 +1134,94 @@ class _AdminSetupScreenState extends State<AdminSetupScreen> {
                                 ),
                             ],
                           ),
-                          trailing: Row(
+                          // Chồng các nút lên nhau bằng Column để thu gọn không gian
+                          trailing: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
                             mainAxisSize: MainAxisSize.min,
                             children: [
-                              Switch(
-                                value: isActive,
-                                onChanged: (val) => _toggleActive(
-                                  item['id'],
-                                  isActive,
-                                  item['target_role'],
+                              SizedBox(
+                                height: 24,
+                                child: Tooltip(
+                                  message: 'Bật/Tắt làm chặng mặc định cho BXH',
+                                  child: Switch(
+                                    value: isActive,
+                                    onChanged: (val) =>
+                                        _confirmToggleActive(item, isActive),
+                                    activeThumbColor: isAlert
+                                        ? Colors.red
+                                        : Colors.green,
+                                    activeTrackColor: isAlert
+                                        ? Colors.red.shade200
+                                        : Colors.green.shade300,
+                                  ),
                                 ),
-                                activeThumbColor: isAlert
-                                    ? Colors.red
-                                    : Colors.green,
-                                activeTrackColor: isAlert
-                                    ? Colors.red.shade200
-                                    : Colors.green.shade300,
                               ),
-                              IconButton(
-                                icon: const Icon(
-                                  Icons.edit,
-                                  color: Colors.blue,
-                                ),
-                                tooltip: 'Sửa thời gian',
-                                onPressed: () => _checkAndShowEditDialog(item),
-                              ),
-                              IconButton(
-                                icon: const Icon(
-                                  Icons.delete,
-                                  color: Colors.red,
-                                ),
-                                tooltip: 'Xóa đợt',
-                                onPressed: () {
-                                  showDialog(
-                                    context: context,
-                                    builder: (ctx) => AlertDialog(
-                                      title: const Text('Xác nhận xóa'),
-                                      content: Text(
-                                        'Bạn có chắc muốn xóa đợt "${item['period_name']}" không?',
+                              const SizedBox(height: 8),
+                              Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  SizedBox(
+                                    width: 32,
+                                    height: 32,
+                                    child: IconButton(
+                                      padding: EdgeInsets.zero,
+                                      icon: const Icon(
+                                        Icons.edit,
+                                        color: Colors.blue,
+                                        size: 20,
                                       ),
-                                      actions: [
-                                        TextButton(
-                                          onPressed: () => Navigator.pop(ctx),
-                                          child: const Text('Hủy'),
-                                        ),
-                                        ElevatedButton(
-                                          onPressed: () {
-                                            Navigator.pop(ctx);
-                                            _deletePeriod(item['id']);
-                                          },
-                                          style: ElevatedButton.styleFrom(
-                                            backgroundColor: Colors.red,
-                                          ),
-                                          child: const Text(
-                                            'Xóa',
-                                            style: TextStyle(
-                                              color: Colors.white,
-                                            ),
-                                          ),
-                                        ),
-                                      ],
+                                      tooltip: 'Sửa thời gian',
+                                      onPressed: () =>
+                                          _checkAndShowEditDialog(item),
                                     ),
-                                  );
-                                },
+                                  ),
+                                  SizedBox(
+                                    width: 32,
+                                    height: 32,
+                                    child: IconButton(
+                                      padding: EdgeInsets.zero,
+                                      icon: const Icon(
+                                        Icons.delete,
+                                        color: Colors.red,
+                                        size: 20,
+                                      ),
+                                      tooltip: 'Xóa đợt',
+                                      onPressed: () {
+                                        showDialog(
+                                          context: context,
+                                          builder: (ctx) => AlertDialog(
+                                            title: const Text('Xác nhận xóa'),
+                                            content: Text(
+                                              'Bạn có chắc muốn xóa đợt "${item['period_name']}" không?',
+                                            ),
+                                            actions: [
+                                              TextButton(
+                                                onPressed: () =>
+                                                    Navigator.pop(ctx),
+                                                child: const Text('Hủy'),
+                                              ),
+                                              ElevatedButton(
+                                                onPressed: () {
+                                                  Navigator.pop(ctx);
+                                                  _deletePeriod(item['id']);
+                                                },
+                                                style: ElevatedButton.styleFrom(
+                                                  backgroundColor: Colors.red,
+                                                ),
+                                                child: const Text(
+                                                  'Xóa',
+                                                  style: TextStyle(
+                                                    color: Colors.white,
+                                                  ),
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                        );
+                                      },
+                                    ),
+                                  ),
+                                ],
                               ),
                             ],
                           ),
@@ -942,8 +1229,8 @@ class _AdminSetupScreenState extends State<AdminSetupScreen> {
                       );
                     },
                   ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }

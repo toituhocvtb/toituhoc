@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'package:flutter/foundation.dart'; // Thêm kIsWeb và Uint8List
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart'; // Thêm thư viện format số
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -35,12 +36,9 @@ class _QuickLogWidgetState extends State<QuickLogWidget> {
   bool _isLatePhase = false; // Cờ kiểm tra kê khai muộn
   bool _confirmLate = false; // Checkbox xác nhận kê khai muộn
   DateTime _completionDate = DateTime.now(); // Ngày giờ hoàn thành (có thể sửa)
-  // Trạng thái lưu file minh chứng (KNS)
-  String? _selectedFileName;
-  String? _selectedFilePath;
-  int? _selectedFileSize;
-  DateTime? _uploadTimestamp;
-
+  // Trạng thái lưu file minh chứng (KNS) - Hỗ trợ nhiều file
+  final List<Map<String, dynamic>> _selectedAttachments = [];
+  int _maxKnsImages = 1; // Mặc định 1, sẽ được cập nhật từ Admin Config
   @override
   void initState() {
     super.initState();
@@ -90,6 +88,13 @@ class _QuickLogWidgetState extends State<QuickLogWidget> {
         }
       }
 
+      // Tải cấu hình số lượng ảnh tối đa cho QuickLog từ bảng system_configs
+      final configRes = await Supabase.instance.client
+          .from('system_configs')
+          .select('config_value')
+          .eq('config_key', 'max_quicklog_kns_images')
+          .maybeSingle();
+
       // Tải kèm start_date và end_date để xử lý logic cảnh báo
       final periodsRes = await Supabase.instance.client
           .from('learning_periods')
@@ -112,7 +117,30 @@ class _QuickLogWidgetState extends State<QuickLogWidget> {
           }
 
           _userRole = role;
-          _phaseDataList = List<Map<String, dynamic>>.from(periodsRes);
+          if (configRes != null && configRes['config_value'] != null) {
+            _maxKnsImages = configRes['config_value'] as int;
+          }
+
+          // Tự động format tên chặng kèm thời gian thực tế từ DB cho Dropdown
+          _phaseDataList = List<Map<String, dynamic>>.from(periodsRes).map((p) {
+            Map<String, dynamic> period = Map<String, dynamic>.from(p);
+            String rawName = period['period_name'] ?? '';
+            String baseName = rawName
+                .replaceAll(RegExp(r'\s*\(.*?\)'), '')
+                .trim();
+
+            DateTime? sDate = DateTime.tryParse(period['start_date'] ?? '');
+            DateTime? eDate = DateTime.tryParse(period['end_date'] ?? '');
+
+            if (sDate != null && eDate != null) {
+              period['period_name'] =
+                  '$baseName (${sDate.day}/${sDate.month} - ${eDate.day}/${eDate.month})';
+            } else {
+              period['period_name'] = baseName;
+            }
+            return period;
+          }).toList();
+
           _phaseList = _phaseDataList
               .map((e) => e['period_name'] as String)
               .toList();
@@ -242,10 +270,12 @@ class _QuickLogWidgetState extends State<QuickLogWidget> {
       return;
     }
 
-    if (_userRole == 'kns' && _selectedFileName == null) {
+    if (_userRole == 'kns' && _selectedAttachments.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Khối Nhân sự bắt buộc phải tải lên file minh chứng!'),
+          content: Text(
+            'Khối Nhân sự bắt buộc phải đính kèm ít nhất 1 ảnh minh chứng!',
+          ),
           backgroundColor: Colors.red,
         ),
       );
@@ -255,42 +285,63 @@ class _QuickLogWidgetState extends State<QuickLogWidget> {
 
     try {
       final user = Supabase.instance.client.auth.currentUser;
-      String? storagePath;
 
-      // Xử lý upload file lên Supabase Storage trước khi insert db
-      if (_userRole == 'kns' && _selectedFilePath != null) {
-        final file = File(_selectedFilePath!);
-        final fileExt = _selectedFileName!.split('.').last;
-        // Tạo tên file unique tránh trùng lặp
-        final fileName =
-            '${user?.id}_${DateTime.now().millisecondsSinceEpoch}.$fileExt';
-        storagePath = 'kns_evidence/$fileName';
+      // 1. Insert giờ học trước để lấy ID (Dùng .select().single() để lấy dòng vừa tạo)
+      final insertedRow = await Supabase.instance.client
+          .from('learning_hours')
+          .insert({
+            'user_id': user?.id,
+            'course_name': course,
+            'duration_minutes': _totalCalculatedMinutes,
+            'phase_batch': _selectedPhase,
+            'platform': finalPlatform,
+            'completion_date': _completionDate.toIso8601String(),
+            'evidence_file_name': _selectedAttachments.isNotEmpty
+                ? _selectedAttachments.first['name']
+                : null,
+          })
+          .select('id')
+          .single();
 
-        await Supabase.instance.client.storage
-            .from('learning-evidence')
-            .upload(storagePath, file);
+      final recordId = insertedRow['id'];
 
-        _uploadTimestamp =
-            DateTime.now(); // Lưu timestamp thực tế lúc upload xong
+      // 2. Upload Multi-file & Insert vào evidence_attachments
+      if (_userRole == 'kns' && _selectedAttachments.isNotEmpty) {
+        List<Map<String, dynamic>> attachmentInserts = [];
+
+        for (int i = 0; i < _selectedAttachments.length; i++) {
+          final att = _selectedAttachments[i];
+          final fileExt = att['name'].toString().split('.').last;
+          final fileName =
+              '${user?.id}_quicklog_${DateTime.now().millisecondsSinceEpoch}_$i.$fileExt';
+          final storagePath = 'kns_evidence/$fileName';
+
+          if (kIsWeb || att['bytes'] != null) {
+            await Supabase.instance.client.storage
+                .from('learning-evidence')
+                .uploadBinary(storagePath, att['bytes']);
+          } else if (att['path'] != null) {
+            final file = File(att['path']);
+            await Supabase.instance.client.storage
+                .from('learning-evidence')
+                .upload(storagePath, file);
+          }
+
+          attachmentInserts.add({
+            'record_id': recordId,
+            'module_type': 'quick_log',
+            'file_path': storagePath,
+            'file_name': att['name'],
+            'file_size': att['size'],
+          });
+        }
+
+        if (attachmentInserts.isNotEmpty) {
+          await Supabase.instance.client
+              .from('evidence_attachments')
+              .insert(attachmentInserts);
+        }
       }
-
-      await Supabase.instance.client.from('learning_hours').insert({
-        'user_id': user?.id,
-        'course_name': course,
-        'duration_minutes':
-            _totalCalculatedMinutes, // Đẩy tổng số phút đã tính toán
-        'phase_batch': _selectedPhase,
-        'platform': finalPlatform,
-        'completion_date': _completionDate
-            .toIso8601String(), // Lưu ngày giờ hoàn thành thực tế
-        // Lưu toàn bộ thông tin minh chứng vào DB
-        if (_userRole == 'kns' && storagePath != null) ...{
-          'evidence_storage_path': storagePath,
-          'evidence_file_name': _selectedFileName,
-          'evidence_size': _selectedFileSize,
-          'upload_timestamp': _uploadTimestamp!.toIso8601String(),
-        },
-      });
 
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -306,8 +357,7 @@ class _QuickLogWidgetState extends State<QuickLogWidget> {
       _minutesController.clear();
       setState(() {
         _totalCalculatedMinutes = 0;
-        _selectedFileName = null;
-        _selectedFilePath = null;
+        _selectedAttachments.clear();
       });
       widget.onSavedSuccess();
 
@@ -705,64 +755,33 @@ class _QuickLogWidgetState extends State<QuickLogWidget> {
             if (_userRole == 'kns') ...[
               InkWell(
                 onTap: () async {
+                  if (_selectedAttachments.length >= _maxKnsImages) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text(
+                          'Bạn chỉ được tải lên tối đa $_maxKnsImages ảnh minh chứng!',
+                        ),
+                        backgroundColor: Colors.red,
+                      ),
+                    );
+                    return;
+                  }
+
                   FilePickerResult? result = await FilePicker.pickFiles(
                     type: FileType.custom,
-                    allowedExtensions: [
-                      'jpg',
-                      'jpeg',
-                      'png',
-                    ], // Hỗ trợ thêm jpeg
+                    allowedExtensions: ['jpg', 'jpeg', 'png'],
+                    allowMultiple: true, // Bật tính năng chọn nhiều file
+                    withData: kIsWeb,
                   );
                   if (!context.mounted) return;
 
-                  if (result != null && result.files.single.path != null) {
-                    String originalPath = result.files.single.path!;
-
-                    File finalFile = File(originalPath);
-                    String finalFileName = result.files.single.name;
-
-                    try {
-                      // Chỉ gọi thư viện nén ảnh nếu đang chạy trên thiết bị Mobile
-                      if (Platform.isAndroid || Platform.isIOS) {
-                        final lastIndex = originalPath.lastIndexOf(
-                          RegExp(r'\.jp|\.pn', caseSensitive: false),
-                        );
-                        if (lastIndex != -1) {
-                          final compressedPath =
-                              '${originalPath.substring(0, lastIndex)}_compressed.jpg';
-
-                          var compressedFile =
-                              await FlutterImageCompress.compressAndGetFile(
-                                originalPath,
-                                compressedPath,
-                                quality: 70,
-                                minWidth: 1080,
-                                minHeight: 1080,
-                                format: CompressFormat.jpeg,
-                              );
-
-                          if (compressedFile != null) {
-                            finalFile = File(compressedFile.path);
-                            finalFileName = 'compressed_$finalFileName';
-                          }
-                        }
-                      }
-                    } catch (e) {
-                      debugPrint(
-                        'Bỏ qua nén ảnh do môi trường không hỗ trợ: $e',
-                      );
-                    }
-
-                    // Kiểm tra dung lượng file cuối cùng (file đã nén hoặc file gốc)
-                    final sizeInBytes = await finalFile.length();
-
-                    if (sizeInBytes > 5242880) {
-                      // Giới hạn 5MB
-                      if (!context.mounted) return;
+                  if (result != null) {
+                    if (_selectedAttachments.length + result.files.length >
+                        _maxKnsImages) {
                       ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
+                        SnackBar(
                           content: Text(
-                            'Kích thước ảnh vượt quá 5MB. Vui lòng chọn ảnh nhẹ hơn!',
+                            'Số lượng vượt quá giới hạn. Chỉ được chọn thêm ${_maxKnsImages - _selectedAttachments.length} ảnh!',
                           ),
                           backgroundColor: Colors.red,
                         ),
@@ -770,10 +789,85 @@ class _QuickLogWidgetState extends State<QuickLogWidget> {
                       return;
                     }
 
+                    // Hiện popup loading trong lúc xử lý nén nhiều file
+                    showDialog(
+                      context: context,
+                      barrierDismissible: false,
+                      builder: (BuildContext context) {
+                        return const Center(child: CircularProgressIndicator());
+                      },
+                    );
+
+                    List<Map<String, dynamic>> newAttachments = [];
+
+                    for (var file in result.files) {
+                      if (file.path == null && file.bytes == null) continue;
+
+                      String finalFileName = file.name;
+                      Uint8List? finalBytes = file.bytes;
+                      String? finalPath = file.path;
+                      int sizeInBytes = file.size;
+
+                      try {
+                        if (kIsWeb && finalBytes != null) {
+                          var compressedBytes =
+                              await FlutterImageCompress.compressWithList(
+                                finalBytes,
+                                minWidth: 1080,
+                                minHeight: 1080,
+                                quality: 70,
+                                format: CompressFormat.jpeg,
+                              );
+                          finalBytes = compressedBytes;
+                          sizeInBytes = compressedBytes.length;
+                          finalFileName = 'compressed_$finalFileName';
+                        } else if (!kIsWeb && finalPath != null) {
+                          var compressedFile =
+                              await FlutterImageCompress.compressAndGetFile(
+                                finalPath,
+                                '${finalPath}_compressed_${DateTime.now().millisecondsSinceEpoch}.jpg',
+                                quality: 70,
+                                minWidth: 1080,
+                                minHeight: 1080,
+                                format: CompressFormat.jpeg,
+                              );
+                          if (compressedFile != null) {
+                            finalPath = compressedFile.path;
+                            finalBytes = await compressedFile.readAsBytes();
+                            sizeInBytes = finalBytes.length;
+                            finalFileName = 'compressed_$finalFileName';
+                          }
+                        }
+                      } catch (e) {
+                        debugPrint('Lỗi nén ảnh: $e');
+                      }
+
+                      if (sizeInBytes <= 5242880) {
+                        // Giới hạn 5MB sau khi nén
+                        newAttachments.add({
+                          'name': finalFileName,
+                          'path': finalPath,
+                          'bytes': finalBytes,
+                          'size': sizeInBytes,
+                        });
+                      } else {
+                        if (context.mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: Text(
+                                'Ảnh $finalFileName sau nén vẫn > 5MB, đã bị bỏ qua!',
+                              ),
+                              backgroundColor: Colors.red,
+                            ),
+                          );
+                        }
+                      }
+                    }
+
+                    if (context.mounted) Navigator.pop(context); // Tắt loading
+
                     setState(() {
-                      _selectedFileName = finalFileName;
-                      _selectedFilePath = finalFile.path;
-                      _selectedFileSize = sizeInBytes;
+                      _selectedAttachments.addAll(newAttachments);
                     });
                   }
                 },
@@ -784,12 +878,12 @@ class _QuickLogWidgetState extends State<QuickLogWidget> {
                     horizontal: 16,
                   ),
                   decoration: BoxDecoration(
-                    color: _selectedFileName != null
+                    color: _selectedAttachments.isNotEmpty
                         ? Colors.green.shade50
                         : Colors.grey.shade50,
                     borderRadius: BorderRadius.circular(8),
                     border: Border.all(
-                      color: _selectedFileName != null
+                      color: _selectedAttachments.isNotEmpty
                           ? Colors.green.shade400
                           : Colors.grey.shade300,
                       style: BorderStyle.solid,
@@ -799,10 +893,10 @@ class _QuickLogWidgetState extends State<QuickLogWidget> {
                   child: Row(
                     children: [
                       Icon(
-                        _selectedFileName != null
+                        _selectedAttachments.isNotEmpty
                             ? Icons.check_circle
                             : Icons.cloud_upload_outlined,
-                        color: _selectedFileName != null
+                        color: _selectedAttachments.isNotEmpty
                             ? Colors.green
                             : Colors.blue.shade700,
                         size: 28,
@@ -813,38 +907,59 @@ class _QuickLogWidgetState extends State<QuickLogWidget> {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
-                              _selectedFileName != null
-                                  ? 'Đã đính kèm minh chứng'
-                                  : 'Tải lên minh chứng (Bắt buộc)',
+                              _selectedAttachments.isNotEmpty
+                                  ? 'Đã đính kèm ${_selectedAttachments.length}/$_maxKnsImages ảnh'
+                                  : 'Tải lên minh chứng (Tối đa $_maxKnsImages ảnh)',
                               style: TextStyle(
                                 fontWeight: FontWeight.bold,
-                                color: _selectedFileName != null
+                                color: _selectedAttachments.isNotEmpty
                                     ? Colors.green.shade800
                                     : Colors.black87,
                               ),
                             ),
-                            if (_selectedFileName != null)
-                              Text(
-                                _selectedFileName!,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                  fontSize: 12,
-                                  color: Colors.grey,
-                                ),
-                              )
-                            else
-                              const Text(
-                                'Hỗ trợ định dạng JPG, PNG (Tối đa 5MB)',
-                                style: TextStyle(
-                                  fontSize: 12,
-                                  color: Colors.grey,
-                                ),
+                            const Text(
+                              'Hỗ trợ JPG, PNG (Tối đa 5MB/ảnh)',
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: Colors.grey,
                               ),
+                            ),
                           ],
                         ),
                       ),
-                      if (_selectedFileName != null)
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
+
+              // Render ra danh sách các ảnh đã chọn
+              if (_selectedAttachments.isNotEmpty)
+                ..._selectedAttachments.map((att) {
+                  int index = _selectedAttachments.indexOf(att);
+                  return Container(
+                    margin: const EdgeInsets.only(bottom: 8),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 8,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      border: Border.all(color: Colors.grey.shade300),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.image, color: Colors.blue, size: 20),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            att['name'],
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(fontSize: 13),
+                          ),
+                        ),
                         IconButton(
                           icon: const Icon(
                             Icons.close,
@@ -855,18 +970,16 @@ class _QuickLogWidgetState extends State<QuickLogWidget> {
                           constraints: const BoxConstraints(),
                           onPressed: () {
                             setState(() {
-                              _selectedFileName = null;
-                              _selectedFilePath = null;
+                              _selectedAttachments.removeAt(index);
                             });
                           },
                         ),
-                    ],
-                  ),
-                ),
-              ),
+                      ],
+                    ),
+                  );
+                }),
               const SizedBox(height: 12),
             ],
-
             // CẢNH BÁO ĐỎ NẾU CHỌN CHẶNG ĐÃ QUA
             if (_isLatePhase) ...[
               Container(

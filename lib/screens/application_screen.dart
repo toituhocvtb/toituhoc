@@ -2,9 +2,11 @@ import 'dart:io';
 import 'dart:async';
 import 'dart:convert';
 import 'package:http/http.dart' as http;
+import 'package:flutter/foundation.dart'; // Fix lỗi kIsWeb và Uint8List
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter_image_compress/flutter_image_compress.dart'; // Thêm nén ảnh
 import 'history_screen.dart'; // Khai báo file Lịch sử
 
 class ApplicationScreen extends StatefulWidget {
@@ -38,6 +40,9 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
 
   // Dữ liệu cho Dropdown Khóa học
   List<String> _courseList = [];
+  List<String> _allLearnedCourses = [];
+  Set<String> _appliedCourses = {};
+  bool _showAllCourses = false;
   String? _selectedCourse;
 
   // Trạng thái cho các Checkbox của Khối Nhân sự
@@ -49,15 +54,16 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
   final _coffeeTalkNameController = TextEditingController();
   final _coffeeTalkLearningsController = TextEditingController();
 
-  // Trạng thái lưu file minh chứng
-  String? _appEvidenceFileName;
-  String? _appEvidenceFilePath; // Lưu đường dẫn để upload
+  // Trạng thái lưu file minh chứng - Hỗ trợ nhiều file
+  final List<Map<String, dynamic>> _appEvidenceAttachments = [];
+  final List<Map<String, dynamic>> _groupShareAttachments = [];
+  final List<Map<String, dynamic>> _speakerEvidenceAttachments = [];
 
-  String? _groupShareFileName;
-  String? _groupShareFilePath;
-
-  String? _speakerEvidenceFileName;
-  String? _speakerEvidenceFilePath;
+  // Cấu hình số lượng ảnh linh hoạt từ Database
+  int _maxAppTscImages = 1;
+  int _maxAppKnsImages = 3;
+  int _maxShareKnsImages = 2;
+  int _maxSpeakerKnsImages = 3;
 
   // Cấu hình điểm linh hoạt
   int _knsMaxAi = 20;
@@ -98,9 +104,36 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
     });
   }
 
-  // Tải cấu hình điểm từ Database
+  // Tải cấu hình điểm & số lượng ảnh từ Database
   Future<void> _fetchPointRules() async {
     try {
+      // 1. Tải số lượng ảnh
+      final configRes = await Supabase.instance.client
+          .from('system_configs')
+          .select();
+      if (mounted) {
+        setState(() {
+          for (var row in configRes) {
+            if (row['config_value'] == null) continue;
+            switch (row['config_key']) {
+              case 'max_app_tsc_images':
+                _maxAppTscImages = row['config_value'] as int;
+                break;
+              case 'max_app_kns_images':
+                _maxAppKnsImages = row['config_value'] as int;
+                break;
+              case 'max_share_kns_images':
+                _maxShareKnsImages = row['config_value'] as int;
+                break;
+              case 'max_speaker_kns_images':
+                _maxSpeakerKnsImages = row['config_value'] as int;
+                break;
+            }
+          }
+        });
+      }
+
+      // 2. Tải điểm Gamification
       final res = await Supabase.instance.client
           .from('gamification_rules')
           .select();
@@ -228,7 +261,20 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
     }
   }
 
-  // Lấy danh sách khóa học đã kê khai và LOẠI BỎ các khóa đã nộp ứng dụng
+  // Cập nhật danh sách khóa học hiển thị dựa trên checkbox
+  void _updateCourseDropdown() {
+    Set<String> displayCourses = Set.from(_allLearnedCourses);
+    if (!_showAllCourses) {
+      displayCourses.removeAll(_appliedCourses);
+    }
+    _courseList = displayCourses.toList();
+
+    if (_selectedCourse != null && !_courseList.contains(_selectedCourse)) {
+      _selectedCourse = null;
+    }
+  }
+
+  // Lấy danh sách khóa học đã kê khai
   Future<void> _fetchCourses() async {
     try {
       final userId = Supabase.instance.client.auth.currentUser?.id;
@@ -248,26 +294,15 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
 
       if (mounted) {
         setState(() {
-          // Tạo Set các khóa đã học
-          Set<String> learnedCourses = (hoursResponse as List)
+          _allLearnedCourses = (hoursResponse as List)
+              .map((e) => e['course_name'] as String)
+              .toList();
+
+          _appliedCourses = (appsResponse as List)
               .map((e) => e['course_name'] as String)
               .toSet();
 
-          // Tạo Set các khóa đã ứng dụng
-          Set<String> appliedCourses = (appsResponse as List)
-              .map((e) => e['course_name'] as String)
-              .toSet();
-
-          // THUẬT TOÁN: Lấy danh sách Đã học trừ đi danh sách Đã ứng dụng
-          learnedCourses.removeAll(appliedCourses);
-
-          _courseList = learnedCourses.toList();
-
-          // Bảo vệ Dropdown: Nếu initialCourse truyền vào không nằm trong list mới, phải reset về null
-          if (_selectedCourse != null &&
-              !_courseList.contains(_selectedCourse)) {
-            _selectedCourse = null;
-          }
+          _updateCourseDropdown();
         });
       }
     } catch (e) {
@@ -377,59 +412,103 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
     final practical = _practicalController.text.trim();
     final driveLink = _driveLinkController.text.trim();
 
-    // 1. Chặn lỗi bỏ trống
-    if (course.isEmpty || learnings.isEmpty || practical.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Vui lòng điền đầy đủ các trường bắt buộc!'),
-        ),
-      );
+    // 1. Kiểm tra khóa học (luôn bắt buộc)
+    if (course.isEmpty) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Vui lòng chọn khóa học!')));
       return;
     }
 
-    // 2. NGHIỆP VỤ VALIDATE TỪ (Theo đúng thiết kế DOCX)
-    if (_countWords(learnings) > 500) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Nội dung tâm đắc KHÔNG ĐƯỢC vượt quá 500 từ!'),
-        ),
-      );
-      return;
-    }
+    bool isMainAppFilled = learnings.isNotEmpty && practical.isNotEmpty;
+    bool hasAnyKnsOption =
+        _isKNS && (_isSharedGroup || _isCoffeeTalk || _isSpeaker);
 
-    if (_countWords(practical) < 50) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Nội dung áp dụng thực tế PHẢI CÓ tối thiểu 50 từ!'),
-        ),
-      );
-      return;
-    }
-
-    // Validate Minh chứng cho KNS
-    if (_isKNS) {
-      if (_appEvidenceFileName == null && driveLink.isEmpty) {
+    // Chặn lỗi bỏ trống linh hoạt (KNS có thể không cần form chính nếu có chọn option KNS)
+    if (!_isKNS) {
+      if (!isMainAppFilled) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text(
-              'Khối Nhân sự bắt buộc phải đính kèm file hoặc link minh chứng ứng dụng!',
+              'Vui lòng điền đầy đủ Kiến thức tâm đắc và Thực tế áp dụng!',
             ),
           ),
         );
         return;
       }
-      if (_isSharedGroup && _groupShareFileName == null) {
+    } else {
+      if (!isMainAppFilled && !hasAnyKnsOption) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('Vui lòng upload ảnh chụp màn hình chia sẻ Group!'),
+            content: Text(
+              'Vui lòng kê khai nội dung ứng dụng HOẶC chọn ít nhất 1 tiêu chí bổ sung!',
+            ),
           ),
         );
         return;
       }
-      if (_isSpeaker && _speakerEvidenceFileName == null) {
+      if ((learnings.isNotEmpty && practical.isEmpty) ||
+          (learnings.isEmpty && practical.isNotEmpty)) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('Vui lòng upload minh chứng làm diễn giả!'),
+            content: Text(
+              'Vui lòng điền ĐẦY ĐỦ cả Kiến thức tâm đắc và Thực tế áp dụng nếu bạn muốn kê khai hạng mục chính!',
+            ),
+          ),
+        );
+        return;
+      }
+    }
+
+    // 2. NGHIỆP VỤ VALIDATE TỪ (Theo thiết kế mới: Cả 2 đều Min 50, No Max)
+    if (isMainAppFilled) {
+      if (_countWords(learnings) < 50) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Nội dung tâm đắc PHẢI CÓ tối thiểu 50 từ!'),
+          ),
+        );
+        return;
+      }
+
+      if (_countWords(practical) < 50) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Nội dung áp dụng thực tế PHẢI CÓ tối thiểu 50 từ!'),
+          ),
+        );
+        return;
+      }
+    }
+
+    // Validate Minh chứng cho KNS
+    if (_isKNS) {
+      if (isMainAppFilled &&
+          _appEvidenceAttachments.isEmpty &&
+          driveLink.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Khối Nhân sự bắt buộc phải đính kèm file hoặc link minh chứng cho phần ứng dụng!',
+            ),
+          ),
+        );
+        return;
+      }
+      if (_isSharedGroup && _groupShareAttachments.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Vui lòng upload ít nhất 1 ảnh chụp màn hình chia sẻ Group!',
+            ),
+          ),
+        );
+        return;
+      }
+      if (_isSpeaker && _speakerEvidenceAttachments.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Vui lòng upload ít nhất 1 minh chứng làm diễn giả!'),
           ),
         );
         return;
@@ -458,36 +537,76 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
         'learning-evidence',
       );
 
-      // --- LOGIC UPLOAD FILE THẬT ---
+      // --- LOGIC UPLOAD FILE THẬT VÀO STORAGE ---
       String? appPathDB;
       String? groupPathDB;
       String? speakerPathDB;
       DateTime? shareTimestamp;
 
-      // 1. Upload minh chứng sản phẩm
-      if (_appEvidenceFilePath != null) {
-        final fileName =
-            'apps/${userId}_app_${DateTime.now().millisecondsSinceEpoch}.dat';
-        await storage.upload(fileName, File(_appEvidenceFilePath!));
-        appPathDB = fileName;
+      // Hàm Helper ẩn để xử lý upload chung cho các loại ảnh
+      Future<List<Map<String, dynamic>>> uploadListHelper(
+        List<Map<String, dynamic>> list,
+        String folder,
+        String moduleType,
+      ) async {
+        List<Map<String, dynamic>> insertedList = [];
+        for (int i = 0; i < list.length; i++) {
+          final att = list[i];
+          final fileExt = att['name'].toString().split('.').last;
+          final fileName =
+              '$folder/${userId}_${DateTime.now().millisecondsSinceEpoch}_$i.$fileExt';
+
+          if (kIsWeb || att['bytes'] != null) {
+            await storage.uploadBinary(fileName, att['bytes']);
+          } else if (att['path'] != null) {
+            await storage.upload(fileName, File(att['path']));
+          }
+
+          insertedList.add({
+            'module_type': moduleType,
+            'file_path': fileName,
+            'file_name': att['name'],
+            'file_size': att['size'],
+          });
+        }
+        return insertedList;
+      }
+
+      List<Map<String, dynamic>> allAttachmentsToInsert = [];
+
+      // 1. Upload minh chứng sản phẩm (KNS & TSC)
+      if (_appEvidenceAttachments.isNotEmpty) {
+        var res = await uploadListHelper(
+          _appEvidenceAttachments,
+          'apps',
+          'app_evidence',
+        );
+        allAttachmentsToInsert.addAll(res);
+        appPathDB =
+            res.first['file_name']; // Lưu đại 1 tên để giữ tương thích bảng cũ
       }
 
       // 2. Upload ảnh share group (KNS)
-      if (_isKNS && _groupShareFilePath != null) {
-        final fileName =
-            'shares/${userId}_share_${DateTime.now().millisecondsSinceEpoch}.jpg';
-        await storage.upload(fileName, File(_groupShareFilePath!));
-        groupPathDB = fileName;
-        shareTimestamp =
-            DateTime.now(); // Lưu timestamp thực tế lúc upload thành công
+      if (_isKNS && _groupShareAttachments.isNotEmpty) {
+        var res = await uploadListHelper(
+          _groupShareAttachments,
+          'shares',
+          'share_evidence',
+        );
+        allAttachmentsToInsert.addAll(res);
+        groupPathDB = res.first['file_name'];
+        shareTimestamp = DateTime.now();
       }
 
       // 3. Upload minh chứng diễn giả (KNS)
-      if (_isKNS && _speakerEvidenceFilePath != null) {
-        final fileName =
-            'speakers/${userId}_speaker_${DateTime.now().millisecondsSinceEpoch}.dat';
-        await storage.upload(fileName, File(_speakerEvidenceFilePath!));
-        speakerPathDB = fileName;
+      if (_isKNS && _speakerEvidenceAttachments.isNotEmpty) {
+        var res = await uploadListHelper(
+          _speakerEvidenceAttachments,
+          'speakers',
+          'speaker_evidence',
+        );
+        allAttachmentsToInsert.addAll(res);
+        speakerPathDB = res.first['file_name'];
       }
 
       // 3. Đóng gói dữ liệu cơ bản
@@ -519,14 +638,22 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
 
       // 4. Gọi AI chấm điểm và tính tổng điểm Gamification (Module 3)
       int aiMaxScore = _isKNS ? _knsMaxAi : _tscMaxAi;
-      final aiResult = await _evaluateWithAI(
-        course,
-        learnings,
-        practical,
-        aiMaxScore,
-      );
+      Map<String, dynamic> aiResult = {
+        'score': 0,
+        'feedback': 'Chỉ kê khai tiêu chí bổ sung, không có bài học chính.',
+      };
+      bool isTimeout = false;
 
-      bool isTimeout = aiResult['score'] == -1;
+      if (isMainAppFilled) {
+        aiResult = await _evaluateWithAI(
+          course,
+          learnings,
+          practical,
+          aiMaxScore,
+        );
+        isTimeout = aiResult['score'] == -1;
+      }
+
       int aiScore = isTimeout ? 0 : aiResult['score'];
 
       payload['ai_score'] = isTimeout ? null : aiScore;
@@ -552,47 +679,68 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
 
       payload['gamification_points'] = totalGamificationPoints;
 
-      // 5. Bắn dữ liệu lên Supabase
-      await Supabase.instance.client
+      // 5. Bắn dữ liệu lên Supabase & Lấy ID
+      final insertedRow = await Supabase.instance.client
           .from('practical_applications')
-          .insert(payload);
+          .insert(payload)
+          .select('id')
+          .single();
 
-      if (!mounted) return;
+      final recordId = insertedRow['id'];
+
+      // 6. Gắn ID vào các ảnh và insert vào evidence_attachments
+      if (allAttachmentsToInsert.isNotEmpty) {
+        for (var att in allAttachmentsToInsert) {
+          att['record_id'] = recordId;
+        }
+        await Supabase.instance.client
+            .from('evidence_attachments')
+            .insert(allAttachmentsToInsert);
+      }
 
       _submitTimer?.cancel(); // Dừng đồng hồ
 
-      if (isTimeout) {
-        _showTimeoutDialog();
-      } else {
-        _showAIScoreDialog(aiScore, aiMaxScore, aiResult['feedback']);
+      // KIỂM TRA MOUNTED LẦN CUỐI CÙNG TRƯỚC KHI HIỂN THỊ UI
+      if (mounted) {
+        if (isMainAppFilled) {
+          if (isTimeout) {
+            _showTimeoutDialog();
+          } else {
+            _showAIScoreDialog(aiScore, aiMaxScore, aiResult['feedback']);
+          }
+        }
+
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('🎉 Gửi báo cáo thành công!'),
+            backgroundColor: Colors.green,
+          ),
+        );
+
+        // Reset Form sau khi gửi thành công
+        _learningsController.clear();
+        _practicalController.clear();
+        _driveLinkController.clear();
+        setState(() {
+          _selectedCourse = null;
+          _isSharedGroup = false;
+          _isCoffeeTalk = false;
+          _isSpeaker = false;
+          _appEvidenceAttachments.clear();
+          _groupShareAttachments.clear();
+          _speakerEvidenceAttachments.clear();
+        });
       }
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('🎉 Gửi báo cáo thành công!'),
-          backgroundColor: Colors.green,
-        ),
-      );
-
-      // Reset Form sau khi gửi thành công
-      _learningsController.clear();
-      _practicalController.clear();
-      _driveLinkController.clear();
-      setState(() {
-        _selectedCourse = null;
-        _isSharedGroup = false;
-        _isCoffeeTalk = false;
-        _isSpeaker = false;
-      });
     } catch (e) {
-      if (!mounted) return;
       _submitTimer?.cancel();
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Lỗi Database: $e'),
-          backgroundColor: Colors.red,
-        ),
-      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Lỗi Database: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
     } finally {
       if (mounted) {
         setState(() => _isSubmitting = false);
@@ -648,7 +796,26 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
               '1. Thông tin chung (Bắt buộc)',
               style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
             ),
-            const SizedBox(height: 12),
+            Row(
+              children: [
+                Checkbox(
+                  value: _showAllCourses,
+                  onChanged: (val) {
+                    setState(() {
+                      _showAllCourses = val ?? false;
+                      _updateCourseDropdown();
+                    });
+                  },
+                ),
+                const Expanded(
+                  child: Text(
+                    'Cho phép kê khai lại các khóa đã nộp ứng dụng',
+                    style: TextStyle(fontSize: 14),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
             DropdownButtonFormField<String>(
               // ignore: deprecated_member_use
               value: _selectedCourse,
@@ -673,7 +840,7 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
               controller: _learningsController,
               maxLines: 3,
               decoration: const InputDecoration(
-                labelText: 'Kiến thức tâm đắc (Tối đa 500 từ)',
+                labelText: 'Kiến thức tâm đắc (Tối thiểu 50 từ)',
                 border: OutlineInputBorder(),
               ),
             ),
@@ -682,11 +849,15 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
               child: Padding(
                 padding: const EdgeInsets.only(top: 4, right: 4),
                 child: Text(
-                  '$_learningsWordCount / 500 từ',
+                  _learningsWordCount < 50
+                      ? 'Đã viết $_learningsWordCount từ (Cần thêm ${50 - _learningsWordCount} từ)'
+                      : 'Đã viết $_learningsWordCount từ (Đạt yêu cầu)',
                   style: TextStyle(
                     fontSize: 12,
                     fontWeight: FontWeight.bold,
-                    color: _learningsWordCount > 500 ? Colors.red : Colors.grey,
+                    color: _learningsWordCount < 50
+                        ? Colors.red
+                        : Colors.green.shade700,
                   ),
                 ),
               ),
@@ -737,47 +908,25 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
               ),
             ),
             const SizedBox(height: 12),
-            OutlinedButton.icon(
-              onPressed: () async {
-                FilePickerResult? result = await FilePicker.pickFiles(
-                  type: FileType.custom,
-                  allowedExtensions: ['pdf', 'doc', 'docx', 'xls', 'xlsx'],
-                );
-                if (!context.mounted) {
-                  return; // Fix cảnh báo Don't use BuildContext across async gaps
-                }
-                if (result != null) {
-                  // Chặn file > 10MB (10485760 bytes) để chống đầy bộ nhớ Server
-                  if (result.files.single.size > 10485760) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(
-                        content: Text(
-                          'File minh chứng quá lớn (Vượt quá 10MB). Vui lòng dùng Link Google Drive!',
-                        ),
-                        backgroundColor: Colors.red,
-                        duration: Duration(seconds: 4),
-                      ),
-                    );
-                    return;
-                  }
-
-                  setState(() {
-                    _appEvidenceFileName = result.files.single.name;
-                    _appEvidenceFilePath = result.files.single.path;
-                  });
-                }
-              },
-              icon: const Icon(Icons.upload_file),
-              label: Text(
-                _appEvidenceFileName != null
-                    ? (_appEvidenceFileName!.length > 25
-                          ? '${_appEvidenceFileName!.substring(0, 25)}...'
-                          : _appEvidenceFileName!)
-                    : 'Tải lên minh chứng (PDF/Word/Excel)',
-              ),
+            // Helper Widget để vẽ UI Upload đa năng
+            _buildMultiUploadSection(
+              title: 'Tải lên minh chứng ứng dụng',
+              maxImages: _isKNS ? _maxAppKnsImages : _maxAppTscImages,
+              attachmentsList: _appEvidenceAttachments,
+              allowedExtensions: [
+                'jpg',
+                'jpeg',
+                'png',
+                'pdf',
+                'doc',
+                'docx',
+                'xls',
+                'xlsx',
+              ],
             ),
+
             if (_isKNS &&
-                _appEvidenceFileName == null &&
+                _appEvidenceAttachments.isEmpty &&
                 _driveLinkController.text.isEmpty)
               const Padding(
                 padding: EdgeInsets.only(top: 4.0),
@@ -820,25 +969,11 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
                           ),
                         ),
                         const SizedBox(height: 8),
-                        OutlinedButton.icon(
-                          onPressed: () async {
-                            FilePickerResult? result =
-                                await FilePicker.pickFiles(
-                                  type: FileType.image,
-                                );
-                            if (!context.mounted) return;
-                            if (result != null) {
-                              setState(() {
-                                _groupShareFileName = result.files.single.name;
-                                _groupShareFilePath = result.files.single.path;
-                              });
-                            }
-                          },
-                          icon: const Icon(Icons.image),
-                          label: Text(
-                            _groupShareFileName ??
-                                'Tải lên ảnh chụp chia sẻ (Bắt buộc)',
-                          ),
+                        _buildMultiUploadSection(
+                          title: 'Tải lên ảnh chụp chia sẻ (Bắt buộc)',
+                          maxImages: _maxShareKnsImages,
+                          attachmentsList: _groupShareAttachments,
+                          allowedExtensions: ['jpg', 'jpeg', 'png'],
                         ),
                       ],
                     ),
@@ -908,25 +1043,20 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
                           ),
                         ),
                         const SizedBox(height: 8),
-                        OutlinedButton.icon(
-                          onPressed: () async {
-                            FilePickerResult? result =
-                                await FilePicker.pickFiles(type: FileType.any);
-                            if (!context.mounted) return;
-                            if (result != null) {
-                              setState(() {
-                                _speakerEvidenceFileName =
-                                    result.files.single.name;
-                                _speakerEvidenceFilePath =
-                                    result.files.single.path;
-                              });
-                            }
-                          },
-                          icon: const Icon(Icons.upload_file),
-                          label: Text(
-                            _speakerEvidenceFileName ??
-                                'Tải lên minh chứng diễn giả (Bắt buộc)',
-                          ),
+                        _buildMultiUploadSection(
+                          title: 'Tải lên minh chứng diễn giả (Bắt buộc)',
+                          maxImages: _maxSpeakerKnsImages,
+                          attachmentsList: _speakerEvidenceAttachments,
+                          allowedExtensions: [
+                            'jpg',
+                            'jpeg',
+                            'png',
+                            'pdf',
+                            'doc',
+                            'docx',
+                            'ppt',
+                            'pptx',
+                          ],
                         ),
                       ],
                     ),
@@ -980,6 +1110,199 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
           ],
         ),
       ),
+    );
+  }
+
+  // Tách riêng logic xử lý file để bảo vệ Context
+  Future<void> _handleFileSelection({
+    required int maxImages,
+    required List<Map<String, dynamic>> attachmentsList,
+    required List<String> allowedExtensions,
+  }) async {
+    if (attachmentsList.length >= maxImages) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Bạn chỉ được tải lên tối đa $maxImages file!'),
+          backgroundColor: Colors.red,
+        ),
+      );
+      return;
+    }
+
+    FilePickerResult? result = await FilePicker.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: allowedExtensions,
+      allowMultiple: true,
+      withData: kIsWeb,
+    );
+
+    if (!mounted || result == null) return;
+
+    if (attachmentsList.length + result.files.length > maxImages) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Chỉ được chọn thêm ${maxImages - attachmentsList.length} file!',
+          ),
+          backgroundColor: Colors.red,
+        ),
+      );
+      return;
+    }
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => const Center(child: CircularProgressIndicator()),
+    );
+
+    List<Map<String, dynamic>> newAttachments = [];
+    List<String> failedFiles = [];
+
+    for (var file in result.files) {
+      if (file.path == null && file.bytes == null) continue;
+
+      String finalFileName = file.name;
+      Uint8List? finalBytes = file.bytes;
+      String? finalPath = file.path;
+      int sizeInBytes = file.size;
+
+      bool isImage = [
+        'jpg',
+        'jpeg',
+        'png',
+      ].contains(file.extension?.toLowerCase());
+
+      try {
+        if (isImage) {
+          if (kIsWeb && finalBytes != null) {
+            final compressedBytes = await FlutterImageCompress.compressWithList(
+              finalBytes,
+              minWidth: 1080,
+              minHeight: 1080,
+              quality: 70,
+              format: CompressFormat.jpeg,
+            );
+            finalBytes = compressedBytes;
+            sizeInBytes = compressedBytes.length;
+            finalFileName = 'compressed_$finalFileName';
+          } else if (!kIsWeb && finalPath != null) {
+            final compressedFile = await FlutterImageCompress.compressAndGetFile(
+              finalPath,
+              '${finalPath}_compressed_${DateTime.now().millisecondsSinceEpoch}.jpg',
+              quality: 70,
+              minWidth: 1080,
+              minHeight: 1080,
+              format: CompressFormat.jpeg,
+            );
+            if (compressedFile != null) {
+              finalPath = compressedFile.path;
+              finalBytes = await compressedFile.readAsBytes();
+              sizeInBytes = finalBytes.length;
+              finalFileName = 'compressed_$finalFileName';
+            }
+          }
+        }
+      } catch (e) {
+        debugPrint('Lỗi nén file: $e');
+      }
+
+      if (sizeInBytes <= 10485760) {
+        newAttachments.add({
+          'name': finalFileName,
+          'path': finalPath,
+          'bytes': finalBytes,
+          'size': sizeInBytes,
+        });
+      } else {
+        failedFiles.add(finalFileName);
+      }
+    }
+
+    if (!mounted) return;
+
+    Navigator.pop(context); // Đóng loading
+
+    if (failedFiles.isNotEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Đã bỏ qua ${failedFiles.length} file vì dung lượng > 10MB sau nén.',
+          ),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+
+    setState(() {
+      attachmentsList.addAll(newAttachments);
+    });
+  }
+
+  // Widget Helper chỉ lo việc vẽ UI
+  Widget _buildMultiUploadSection({
+    required String title,
+    required int maxImages,
+    required List<Map<String, dynamic>> attachmentsList,
+    required List<String> allowedExtensions,
+  }) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        OutlinedButton.icon(
+          onPressed: () => _handleFileSelection(
+            maxImages: maxImages,
+            attachmentsList: attachmentsList,
+            allowedExtensions: allowedExtensions,
+          ),
+          icon: const Icon(Icons.upload_file),
+          label: Text(
+            attachmentsList.isNotEmpty
+                ? 'Đã đính kèm ${attachmentsList.length}/$maxImages file'
+                : '$title (Tối đa $maxImages file)',
+          ),
+        ),
+        if (attachmentsList.isNotEmpty) ...[
+          const SizedBox(height: 8),
+          ...attachmentsList.map((att) {
+            int index = attachmentsList.indexOf(att);
+            return Container(
+              margin: const EdgeInsets.only(bottom: 4),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+              decoration: BoxDecoration(
+                color: Colors.grey.shade100,
+                border: Border.all(color: Colors.grey.shade300),
+                borderRadius: BorderRadius.circular(6),
+              ),
+              child: Row(
+                children: [
+                  const Icon(
+                    Icons.insert_drive_file,
+                    color: Colors.blueGrey,
+                    size: 18,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      att['name'],
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.close, color: Colors.red, size: 18),
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(),
+                    onPressed: () =>
+                        setState(() => attachmentsList.removeAt(index)),
+                  ),
+                ],
+              ),
+            );
+          }),
+        ],
+      ],
     );
   }
 }

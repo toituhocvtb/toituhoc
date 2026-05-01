@@ -229,7 +229,7 @@ class _LoginScreenState extends State<LoginScreen> {
                               ),
                               const SizedBox(height: 18),
                               const Text(
-                                'Đây là ứng dụng lưu trữ thông tin tự học được phát triển bởi\nTrường ĐT&PTNNL',
+                                'Ứng dụng lưu trữ thông tin tự học\n được phát triển bởi\nTrường ĐT&PTNNL',
                                 textAlign: TextAlign.center,
                                 style: TextStyle(
                                   fontSize: 14,
