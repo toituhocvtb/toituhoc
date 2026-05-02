@@ -805,6 +805,151 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
     super.dispose();
   }
 
+  // Hàm hiển thị Dialog tìm kiếm khóa học cho Web/Desktop
+  void _showSearchableCourseDialog() {
+    showDialog(
+      context: context,
+      builder: (BuildContext ctx) {
+        String searchQuery = '';
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            final filteredCourses = _courseList
+                .where(
+                  (c) => c.toLowerCase().contains(searchQuery.toLowerCase()),
+                )
+                .toList();
+
+            return AlertDialog(
+              title: const Text('Tìm kiếm khóa học'),
+              content: SizedBox(
+                width: 600,
+                height: 400, // Kích thước cố định cho Web/Desktop
+                child: Column(
+                  children: [
+                    TextField(
+                      autofocus: true,
+                      decoration: const InputDecoration(
+                        labelText: 'Nhập tên khóa học',
+                        prefixIcon: Icon(Icons.search),
+                        border: OutlineInputBorder(),
+                      ),
+                      onChanged: (val) {
+                        setDialogState(() {
+                          searchQuery = val;
+                        });
+                      },
+                    ),
+                    const SizedBox(height: 16),
+                    Expanded(
+                      child: ListView.builder(
+                        itemCount: filteredCourses.length,
+                        itemBuilder: (context, index) {
+                          final course = filteredCourses[index];
+                          return ListTile(
+                            title: Text(course),
+                            selected: _selectedCourse == course,
+                            selectedTileColor: Colors.blue.withOpacity(0.1),
+                            onTap: () {
+                              setState(() {
+                                _selectedCourse = course;
+                              });
+                              Navigator.pop(ctx);
+                            },
+                          );
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('Đóng'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  // Hàm hiển thị BottomSheet tìm kiếm khóa học cho Mobile
+  void _showSearchableCoursePicker() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      builder: (BuildContext ctx) {
+        String searchQuery = '';
+        return StatefulBuilder(
+          builder: (context, setModalState) {
+            final filteredCourses = _courseList
+                .where(
+                  (c) => c.toLowerCase().contains(searchQuery.toLowerCase()),
+                )
+                .toList();
+
+            return Padding(
+              padding: EdgeInsets.only(
+                bottom: MediaQuery.of(
+                  ctx,
+                ).viewInsets.bottom, // Đẩy khung lên khi bàn phím xuất hiện
+              ),
+              child: SizedBox(
+                height:
+                    MediaQuery.of(context).size.height *
+                    0.8, // Chiếm 80% màn hình để tối đa diện tích
+                child: Column(
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.all(16.0),
+                      child: TextField(
+                        autofocus: true,
+                        decoration: InputDecoration(
+                          labelText: 'Tìm kiếm khóa học',
+                          prefixIcon: const Icon(Icons.search),
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                        ),
+                        onChanged: (val) {
+                          setModalState(() {
+                            searchQuery = val;
+                          });
+                        },
+                      ),
+                    ),
+                    Expanded(
+                      child: ListView.builder(
+                        itemCount: filteredCourses.length,
+                        itemBuilder: (context, index) {
+                          final course = filteredCourses[index];
+                          return ListTile(
+                            title: Text(course),
+                            selected: _selectedCourse == course,
+                            selectedTileColor: Colors.blue.withOpacity(0.1),
+                            onTap: () {
+                              setState(() {
+                                _selectedCourse = course;
+                              });
+                              Navigator.pop(ctx);
+                            },
+                          );
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     // Hiện vòng xoay trong lúc App đang chạy lên Supabase để hỏi xem user này là KNS hay TSC
@@ -846,10 +991,41 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
             DropdownButtonFormField<String>(
               initialValue: _selectedPhase,
               isExpanded: true,
+              itemHeight: 70,
               decoration: const InputDecoration(
                 labelText: 'Chặng / Đợt ghi nhận',
                 border: OutlineInputBorder(),
               ),
+              // Hiển thị 1 dòng khi đã chọn để KHÔNG bao giờ bị tràn viền (Overflow)
+              selectedItemBuilder: (BuildContext context) {
+                return _phaseList.map<Widget>((phaseData) {
+                  String pName = phaseData['period_name'] ?? '';
+                  String sDate = '';
+                  String eDate = '';
+                  try {
+                    if (phaseData['start_date'] != null) {
+                      final d = DateTime.parse(phaseData['start_date']);
+                      sDate =
+                          '${d.day.toString().padLeft(2, '0')}/${d.month.toString().padLeft(2, '0')}';
+                    }
+                    if (phaseData['end_date'] != null) {
+                      final d = DateTime.parse(phaseData['end_date']);
+                      eDate =
+                          '${d.day.toString().padLeft(2, '0')}/${d.month.toString().padLeft(2, '0')}';
+                    }
+                  } catch (_) {}
+
+                  String displayText = pName;
+                  if (sDate.isNotEmpty && eDate.isNotEmpty) {
+                    displayText = '$pName ($sDate - $eDate)';
+                  }
+
+                  return Container(
+                    alignment: Alignment.centerLeft,
+                    child: Text(displayText, overflow: TextOverflow.ellipsis),
+                  );
+                }).toList();
+              },
               items: _phaseList.map((phaseData) {
                 String pName = phaseData['period_name'];
                 String sDate = '';
@@ -914,22 +1090,46 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
               ],
             ),
             const SizedBox(height: 8),
-            DropdownButtonFormField<String>(
-              initialValue: _selectedCourse,
-              decoration: const InputDecoration(
-                labelText: 'Khóa học',
-                border: OutlineInputBorder(),
-              ),
-              items: _courseList.map((String course) {
-                return DropdownMenuItem<String>(
-                  value: course,
-                  child: Text(course),
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final isDesktop = constraints.maxWidth > 600;
+
+                // Dùng chung 1 giao diện nút bấm giả Dropdown cho cả Web và Mobile
+                return InkWell(
+                  onTap: isDesktop
+                      ? _showSearchableCourseDialog
+                      : _showSearchableCoursePicker,
+                  borderRadius: BorderRadius.circular(4),
+                  child: InputDecorator(
+                    decoration: const InputDecoration(
+                      labelText: 'Khóa học',
+                      border: OutlineInputBorder(),
+                    ),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Expanded(
+                          child: Text(
+                            _selectedCourse ?? 'Chọn khóa học',
+                            style: TextStyle(
+                              color: _selectedCourse == null
+                                  ? Colors.grey[600]
+                                  : Theme.of(
+                                      context,
+                                    ).textTheme.bodyLarge?.color,
+                            ),
+                            overflow: TextOverflow
+                                .ellipsis, // Cắt chữ dài tránh lỗi tràn màn hình
+                          ),
+                        ),
+                        const Icon(
+                          Icons.search,
+                          color: Colors.grey,
+                        ), // Đổi icon thành kính lúp để rõ tính năng tìm kiếm
+                      ],
+                    ),
+                  ),
                 );
-              }).toList(),
-              onChanged: (String? newValue) {
-                setState(() {
-                  _selectedCourse = newValue;
-                });
               },
             ),
             const SizedBox(height: 24),
