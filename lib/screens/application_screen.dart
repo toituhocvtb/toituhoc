@@ -38,6 +38,10 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
   final _practicalController = TextEditingController();
   final _driveLinkController = TextEditingController();
 
+  // Dữ liệu cho Dropdown Chặng/Đợt
+  List<Map<String, dynamic>> _phaseList = [];
+  String? _selectedPhase;
+
   // Dữ liệu cho Dropdown Khóa học
   List<String> _courseList = [];
   List<String> _allLearnedCourses = [];
@@ -46,6 +50,7 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
   String? _selectedCourse;
 
   // Trạng thái cho các Checkbox của Khối Nhân sự
+  bool _isMainApp = false; // Công tắc bật/tắt mục Ứng dụng chính cho KNS
   bool _isSharedGroup = false;
   bool _isCoffeeTalk = false;
   bool _isSpeaker = false;
@@ -325,11 +330,64 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
       if (mounted) {
         setState(() {
           _isKNS = (data['role'] == 'kns');
-          _isLoadingRole = false;
+        });
+      }
+
+      // Sau khi biết role, gọi hàm lấy danh sách Chặng/Đợt
+      await _fetchPhases();
+    } catch (e) {
+      debugPrint('Lỗi tải role: $e');
+      if (mounted) setState(() => _isLoadingRole = false);
+    }
+  }
+
+  // NGHIỆP VỤ 1.1: Tải danh sách Chặng/Đợt theo Role
+  Future<void> _fetchPhases() async {
+    try {
+      final roleStr = _isKNS ? 'kns' : 'tsc';
+      final res = await Supabase.instance.client
+          .from('learning_periods')
+          .select('period_name, start_date, end_date, is_active')
+          .eq('target_role', roleStr)
+          .order('start_date', ascending: true);
+
+      List<Map<String, dynamic>> phases = [];
+      String? activePhase;
+      final now = DateTime.now();
+
+      for (var row in res) {
+        String pName = row['period_name'] as String;
+        DateTime? sDate = DateTime.tryParse(row['start_date'] ?? '');
+        DateTime? eDate = DateTime.tryParse(row['end_date'] ?? '');
+
+        // Bỏ qua (ẩn) các chặng chưa đến thời gian bắt đầu để tránh kê khai sai
+        if (sDate != null && now.isBefore(sDate)) {
+          continue;
+        }
+
+        phases.add(row);
+
+        // Ưu tiên set Active nếu DB mở cờ is_active VÀ ngày hiện tại nằm trong chặng
+        if (row['is_active'] == true && sDate != null && eDate != null) {
+          if (now.isAfter(sDate.subtract(const Duration(days: 1))) &&
+              now.isBefore(eDate.add(const Duration(days: 1)))) {
+            activePhase = pName;
+          }
+        }
+      }
+
+      if (mounted) {
+        setState(() {
+          _phaseList = phases;
+          // Ưu tiên chọn chặng active, nếu không có thì lấy phần tử đầu tiên trong danh sách hợp lệ
+          _selectedPhase =
+              activePhase ??
+              (phases.isNotEmpty ? phases.first['period_name'] : null);
+          _isLoadingRole = false; // Tắt loading tổng của màn hình
         });
       }
     } catch (e) {
-      debugPrint('Lỗi tải role: $e');
+      debugPrint('Lỗi tải danh sách chặng: $e');
       if (mounted) setState(() => _isLoadingRole = false);
     }
   }
@@ -408,11 +466,19 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
   // NGHIỆP VỤ 2: Xử lý logic Gửi báo cáo
   Future<void> _submitApplication() async {
     final course = _selectedCourse ?? '';
+    final phase = _selectedPhase ?? '';
     final learnings = _learningsController.text.trim();
     final practical = _practicalController.text.trim();
     final driveLink = _driveLinkController.text.trim();
 
-    // 1. Kiểm tra khóa học (luôn bắt buộc)
+    // 1. Kiểm tra Chặng và khóa học (luôn bắt buộc)
+    if (phase.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Vui lòng chọn Chặng/Đợt ghi nhận!')),
+      );
+      return;
+    }
+
     if (course.isEmpty) {
       ScaffoldMessenger.of(
         context,
@@ -420,13 +486,23 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
       return;
     }
 
-    bool isMainAppFilled = learnings.isNotEmpty && practical.isNotEmpty;
+    // Xác định trạng thái của mục Ứng dụng chính (TSC mặc định luôn bật, KNS dựa vào công tắc)
+    bool isMainAppActive = !_isKNS || _isMainApp;
     bool hasAnyKnsOption =
-        _isKNS && (_isSharedGroup || _isCoffeeTalk || _isSpeaker);
+        _isKNS && (_isMainApp || _isSharedGroup || _isCoffeeTalk || _isSpeaker);
 
-    // Chặn lỗi bỏ trống linh hoạt (KNS có thể không cần form chính nếu có chọn option KNS)
-    if (!_isKNS) {
-      if (!isMainAppFilled) {
+    if (_isKNS && !hasAnyKnsOption) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Vui lòng bật ít nhất 1 công tắc hạng mục để kê khai!'),
+        ),
+      );
+      return;
+    }
+
+    // 2. NGHIỆP VỤ VALIDATE TỪ CHO HẠNG MỤC CHÍNH
+    if (isMainAppActive) {
+      if (learnings.isEmpty || practical.isEmpty) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text(
@@ -436,32 +512,6 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
         );
         return;
       }
-    } else {
-      if (!isMainAppFilled && !hasAnyKnsOption) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text(
-              'Vui lòng kê khai nội dung ứng dụng HOẶC chọn ít nhất 1 tiêu chí bổ sung!',
-            ),
-          ),
-        );
-        return;
-      }
-      if ((learnings.isNotEmpty && practical.isEmpty) ||
-          (learnings.isEmpty && practical.isNotEmpty)) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text(
-              'Vui lòng điền ĐẦY ĐỦ cả Kiến thức tâm đắc và Thực tế áp dụng nếu bạn muốn kê khai hạng mục chính!',
-            ),
-          ),
-        );
-        return;
-      }
-    }
-
-    // 2. NGHIỆP VỤ VALIDATE TỪ (Theo thiết kế mới: Cả 2 đều Min 50, No Max)
-    if (isMainAppFilled) {
       if (_countWords(learnings) < 50) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
@@ -470,7 +520,6 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
         );
         return;
       }
-
       if (_countWords(practical) < 50) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
@@ -481,15 +530,15 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
       }
     }
 
-    // Validate Minh chứng cho KNS
+    // Validate Minh chứng
     if (_isKNS) {
-      if (isMainAppFilled &&
+      if (isMainAppActive &&
           _appEvidenceAttachments.isEmpty &&
           driveLink.isEmpty) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text(
-              'Khối Nhân sự bắt buộc phải đính kèm file hoặc link minh chứng cho phần ứng dụng!',
+              'Vui lòng đính kèm file hoặc link minh chứng cho phần Sản phẩm ứng dụng!',
             ),
           ),
         );
@@ -543,7 +592,7 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
       String? speakerPathDB;
       DateTime? shareTimestamp;
 
-      // Hàm Helper ẩn để xử lý upload chung cho các loại ảnh
+      // Hàm Helper ẩn để xử lý upload
       Future<List<Map<String, dynamic>>> uploadListHelper(
         List<Map<String, dynamic>> list,
         String folder,
@@ -574,20 +623,19 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
 
       List<Map<String, dynamic>> allAttachmentsToInsert = [];
 
-      // 1. Upload minh chứng sản phẩm (KNS & TSC)
-      if (_appEvidenceAttachments.isNotEmpty) {
+      // 1. Upload minh chứng sản phẩm (Chỉ làm khi mục này bật)
+      if (isMainAppActive && _appEvidenceAttachments.isNotEmpty) {
         var res = await uploadListHelper(
           _appEvidenceAttachments,
           'apps',
           'app_evidence',
         );
         allAttachmentsToInsert.addAll(res);
-        appPathDB =
-            res.first['file_name']; // Lưu đại 1 tên để giữ tương thích bảng cũ
+        appPathDB = res.first['file_name'];
       }
 
       // 2. Upload ảnh share group (KNS)
-      if (_isKNS && _groupShareAttachments.isNotEmpty) {
+      if (_isKNS && _isSharedGroup && _groupShareAttachments.isNotEmpty) {
         var res = await uploadListHelper(
           _groupShareAttachments,
           'shares',
@@ -599,7 +647,7 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
       }
 
       // 3. Upload minh chứng diễn giả (KNS)
-      if (_isKNS && _speakerEvidenceAttachments.isNotEmpty) {
+      if (_isKNS && _isSpeaker && _speakerEvidenceAttachments.isNotEmpty) {
         var res = await uploadListHelper(
           _speakerEvidenceAttachments,
           'speakers',
@@ -609,22 +657,26 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
         speakerPathDB = res.first['file_name'];
       }
 
-      // 3. Đóng gói dữ liệu cơ bản
+      // 3. Đóng gói dữ liệu cơ bản (Trường nào không bật thì lưu null)
       final Map<String, dynamic> payload = {
         'user_id': userId,
+        'phase_batch': phase,
         'course_name': course,
-        'key_learnings': learnings,
-        'practical_results': practical,
-        'drive_link': driveLink.isNotEmpty ? driveLink : null,
-        'app_evidence_path': appPathDB, // Lưu đường dẫn thật vào DB
+        'key_learnings': isMainAppActive ? learnings : null,
+        'practical_results': isMainAppActive ? practical : null,
+        'drive_link': (isMainAppActive && driveLink.isNotEmpty)
+            ? driveLink
+            : null,
+        'app_evidence_path': isMainAppActive ? appPathDB : null,
       };
 
-      // Nếu là người của Khối Nhân Sự, đính kèm thêm dữ liệu Coffee Talk
       if (_isKNS) {
         payload.addAll({
           'is_shared_group': _isSharedGroup,
-          'group_share_path': groupPathDB,
-          'share_group_timestamp': shareTimestamp?.toIso8601String(),
+          'group_share_path': _isSharedGroup ? groupPathDB : null,
+          'share_group_timestamp': _isSharedGroup
+              ? shareTimestamp?.toIso8601String()
+              : null,
           'coffee_talk_name': _isCoffeeTalk
               ? _coffeeTalkNameController.text.trim()
               : null,
@@ -632,11 +684,11 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
               ? _coffeeTalkLearningsController.text.trim()
               : null,
           'is_speaker': _isSpeaker,
-          'speaker_evidence_path': speakerPathDB,
+          'speaker_evidence_path': _isSpeaker ? speakerPathDB : null,
         });
       }
 
-      // 4. Gọi AI chấm điểm và tính tổng điểm Gamification (Module 3)
+      // 4. Gọi AI chấm điểm và tính tổng điểm Gamification
       int aiMaxScore = _isKNS ? _knsMaxAi : _tscMaxAi;
       Map<String, dynamic> aiResult = {
         'score': 0,
@@ -644,7 +696,7 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
       };
       bool isTimeout = false;
 
-      if (isMainAppFilled) {
+      if (isMainAppActive) {
         aiResult = await _evaluateWithAI(
           course,
           learnings,
@@ -655,26 +707,16 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
       }
 
       int aiScore = isTimeout ? 0 : aiResult['score'];
-
       payload['ai_score'] = isTimeout ? null : aiScore;
       payload['ai_feedback'] = isTimeout
           ? 'Đang chờ hệ thống chấm điểm ngầm...'
           : aiResult['feedback'];
 
-      int totalGamificationPoints = aiScore; // Điểm sản phẩm ứng dụng
-
+      int totalGamificationPoints = aiScore;
       if (_isKNS) {
-        if (_isSharedGroup) {
-          totalGamificationPoints +=
-              _shareGroupPts; // Chia sẻ group chung linh hoạt
-        }
-        if (_isCoffeeTalk) {
-          totalGamificationPoints +=
-              _coffeeTalkPts; // Tham dự Coffee Talk linh hoạt
-        }
-        if (_isSpeaker) {
-          totalGamificationPoints += _speakerPts; // Diễn giả linh hoạt
-        }
+        if (_isSharedGroup) totalGamificationPoints += _shareGroupPts;
+        if (_isCoffeeTalk) totalGamificationPoints += _coffeeTalkPts;
+        if (_isSpeaker) totalGamificationPoints += _speakerPts;
       }
 
       payload['gamification_points'] = totalGamificationPoints;
@@ -688,7 +730,7 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
 
       final recordId = insertedRow['id'];
 
-      // 6. Gắn ID vào các ảnh và insert vào evidence_attachments
+      // 6. Gắn ID vào các ảnh và insert
       if (allAttachmentsToInsert.isNotEmpty) {
         for (var att in allAttachmentsToInsert) {
           att['record_id'] = recordId;
@@ -698,11 +740,11 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
             .insert(allAttachmentsToInsert);
       }
 
-      _submitTimer?.cancel(); // Dừng đồng hồ
+      _submitTimer?.cancel();
 
-      // KIỂM TRA MOUNTED LẦN CUỐI CÙNG TRƯỚC KHI HIỂN THỊ UI
+      // UI Thành công
       if (mounted) {
-        if (isMainAppFilled) {
+        if (isMainAppActive) {
           if (isTimeout) {
             _showTimeoutDialog();
           } else {
@@ -717,12 +759,15 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
           ),
         );
 
-        // Reset Form sau khi gửi thành công
+        // Reset Form
         _learningsController.clear();
         _practicalController.clear();
         _driveLinkController.clear();
+        _coffeeTalkNameController.clear();
+        _coffeeTalkLearningsController.clear();
         setState(() {
           _selectedCourse = null;
+          _isMainApp = false;
           _isSharedGroup = false;
           _isCoffeeTalk = false;
           _isSpeaker = false;
@@ -792,10 +837,63 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            // --- PHẦN 1: CHỌN CHẶNG VÀ KHÓA HỌC ---
             const Text(
-              '1. Thông tin chung (Bắt buộc)',
+              '1. Chọn Chặng/Đợt và Khóa học',
               style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
             ),
+            const SizedBox(height: 12),
+            DropdownButtonFormField<String>(
+              initialValue: _selectedPhase,
+              isExpanded: true,
+              decoration: const InputDecoration(
+                labelText: 'Chặng / Đợt ghi nhận',
+                border: OutlineInputBorder(),
+              ),
+              items: _phaseList.map((phaseData) {
+                String pName = phaseData['period_name'];
+                String sDate = '';
+                String eDate = '';
+                try {
+                  if (phaseData['start_date'] != null) {
+                    final d = DateTime.parse(phaseData['start_date']);
+                    sDate =
+                        '${d.day.toString().padLeft(2, '0')}/${d.month.toString().padLeft(2, '0')}/${d.year}';
+                  }
+                  if (phaseData['end_date'] != null) {
+                    final d = DateTime.parse(phaseData['end_date']);
+                    eDate =
+                        '${d.day.toString().padLeft(2, '0')}/${d.month.toString().padLeft(2, '0')}/${d.year}';
+                  }
+                } catch (_) {}
+
+                return DropdownMenuItem<String>(
+                  value: pName,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(pName),
+                      if (sDate.isNotEmpty && eDate.isNotEmpty)
+                        Text(
+                          '$sDate - $eDate',
+                          style: const TextStyle(
+                            fontSize: 12,
+                            color: Colors.grey,
+                          ),
+                        ),
+                    ],
+                  ),
+                );
+              }).toList(),
+              onChanged: (String? newValue) {
+                setState(() {
+                  _selectedPhase = newValue;
+                });
+              },
+            ),
+            const SizedBox(height: 16),
             Row(
               children: [
                 Checkbox(
@@ -817,10 +915,9 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
             ),
             const SizedBox(height: 8),
             DropdownButtonFormField<String>(
-              // ignore: deprecated_member_use
-              value: _selectedCourse,
+              initialValue: _selectedCourse,
               decoration: const InputDecoration(
-                labelText: 'Chọn khóa học đã kê khai',
+                labelText: 'Khóa học',
                 border: OutlineInputBorder(),
               ),
               items: _courseList.map((String course) {
@@ -835,235 +932,274 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
                 });
               },
             ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: _learningsController,
-              maxLines: 3,
-              decoration: const InputDecoration(
-                labelText: 'Kiến thức tâm đắc (Tối thiểu 50 từ)',
-                border: OutlineInputBorder(),
-              ),
-            ),
-            Align(
-              alignment: Alignment.centerRight,
-              child: Padding(
-                padding: const EdgeInsets.only(top: 4, right: 4),
-                child: Text(
-                  _learningsWordCount < 50
-                      ? 'Đã viết $_learningsWordCount từ (Cần thêm ${50 - _learningsWordCount} từ)'
-                      : 'Đã viết $_learningsWordCount từ (Đạt yêu cầu)',
-                  style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.bold,
-                    color: _learningsWordCount < 50
-                        ? Colors.red
-                        : Colors.green.shade700,
-                  ),
-                ),
-              ),
-            ),
-            const SizedBox(height: 8),
-            TextField(
-              controller: _practicalController,
-              maxLines: 4,
-              decoration: const InputDecoration(
-                labelText: 'Thực tế áp dụng (Tối thiểu 50 từ)',
-                border: OutlineInputBorder(),
-              ),
-            ),
-            Align(
-              alignment: Alignment.centerRight,
-              child: Padding(
-                padding: const EdgeInsets.only(top: 4, right: 4),
-                child: Text(
-                  _practicalWordCount < 50
-                      ? 'Đã viết $_practicalWordCount từ (Cần thêm ${50 - _practicalWordCount} từ)'
-                      : 'Đã viết $_practicalWordCount từ (Đạt yêu cầu)',
-                  style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.bold,
-                    color: _practicalWordCount < 50
-                        ? Colors.red
-                        : Colors.green.shade700,
-                  ),
-                ),
-              ),
-            ),
-            const SizedBox(height: 8),
-            const Text(
-              'Đối với file Video hoặc file dung lượng lớn, vui lòng upload lên Google Drive cá nhân và dán link chia sẻ vào ô bên dưới.',
-              style: TextStyle(
-                fontSize: 13,
-                fontStyle: FontStyle.italic,
-                color: Colors.grey,
-              ),
-            ),
-            const SizedBox(height: 8),
-            TextField(
-              controller: _driveLinkController,
-              decoration: const InputDecoration(
-                labelText: 'Link Google Drive minh chứng (nếu có)',
-                border: OutlineInputBorder(),
-                prefixIcon: Icon(Icons.link),
-              ),
-            ),
-            const SizedBox(height: 12),
-            // Helper Widget để vẽ UI Upload đa năng
-            _buildMultiUploadSection(
-              title: 'Tải lên minh chứng ứng dụng',
-              maxImages: _isKNS ? _maxAppKnsImages : _maxAppTscImages,
-              attachmentsList: _appEvidenceAttachments,
-              allowedExtensions: [
-                'jpg',
-                'jpeg',
-                'png',
-                'pdf',
-                'doc',
-                'docx',
-                'xls',
-                'xlsx',
-              ],
-            ),
-
-            if (_isKNS &&
-                _appEvidenceAttachments.isEmpty &&
-                _driveLinkController.text.isEmpty)
-              const Padding(
-                padding: EdgeInsets.only(top: 4.0),
-                child: Text(
-                  '* KNS bắt buộc phải có minh chứng (File hoặc Link Drive)',
-                  style: TextStyle(color: Colors.red, fontSize: 12),
-                ),
-              ),
             const SizedBox(height: 24),
 
-            // Tự động hiển thị thẻ này NẾU người đang đăng nhập là Khối Nhân Sự
-            if (_isKNS) ...[
-              const Text(
-                '2. Tiêu chí bổ sung (Dành riêng Khối Nhân sự)',
-                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+            // --- PHẦN 2: CÁC HẠNG MỤC KÊ KHAI ---
+            Text(
+              _isKNS
+                  ? '2. Chọn hạng mục kê khai (Bật công tắc để nhập)'
+                  : '2. Kê khai kết quả ứng dụng',
+              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 12),
+
+            // MỤC 1: SẢN PHẨM ỨNG DỤNG THỰC TẾ (KNS có công tắc, TSC không có)
+            if (_isKNS)
+              SwitchListTile(
+                title: const Text(
+                  'Kê khai Sản phẩm ứng dụng thực tiễn',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+                value:
+                    _isMainApp, // Lưu ý: Nếu SDK bắt buộc đổi ở đây, báo lại tôi nhé. Tạm thời chỉ đổi activeColor
+                onChanged: (val) => setState(() => _isMainApp = val),
+                activeThumbColor:
+                    Colors.blue, // Đã đổi activeColor thành activeThumbColor
               ),
-              const SizedBox(height: 12),
 
-              if (_hasShareRule) ...[
-                SwitchListTile(
-                  title: const Text('Đã chia sẻ kiến thức trong Group chung'),
-                  value: _isSharedGroup,
-                  onChanged: (val) => setState(() => _isSharedGroup = val),
+            // Form của Sản phẩm ứng dụng (Luôn hiện tự động nếu là TSC, hoặc hiện khi bật công tắc đối với KNS)
+            if (!_isKNS || _isMainApp)
+              Padding(
+                padding: EdgeInsets.only(
+                  left: _isKNS ? 16.0 : 0,
+                  right: _isKNS ? 16.0 : 0,
+                  bottom: 24.0,
+                  top: _isKNS ? 8.0 : 0,
                 ),
-                if (_isSharedGroup)
-                  Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 16.0,
-                      vertical: 8.0,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    TextField(
+                      controller: _learningsController,
+                      maxLines: 3,
+                      decoration: const InputDecoration(
+                        labelText: 'Kiến thức tâm đắc (Tối thiểu 50 từ)',
+                        border: OutlineInputBorder(),
+                      ),
                     ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Text(
-                          'Vui lòng tải lên ảnh chụp màn hình chứng minh bạn đã chia sẻ bài học.',
+                    Align(
+                      alignment: Alignment.centerRight,
+                      child: Padding(
+                        padding: const EdgeInsets.only(top: 4, right: 4),
+                        child: Text(
+                          _learningsWordCount < 50
+                              ? 'Đã viết $_learningsWordCount từ (Cần thêm ${50 - _learningsWordCount} từ)'
+                              : 'Đã viết $_learningsWordCount từ (Đạt yêu cầu)',
                           style: TextStyle(
-                            fontSize: 13,
-                            fontStyle: FontStyle.italic,
-                            color: Colors.grey,
+                            fontSize: 12,
+                            fontWeight: FontWeight.bold,
+                            color: _learningsWordCount < 50
+                                ? Colors.red
+                                : Colors.green.shade700,
                           ),
                         ),
-                        const SizedBox(height: 8),
-                        _buildMultiUploadSection(
-                          title: 'Tải lên ảnh chụp chia sẻ (Bắt buộc)',
-                          maxImages: _maxShareKnsImages,
-                          attachmentsList: _groupShareAttachments,
-                          allowedExtensions: ['jpg', 'jpeg', 'png'],
-                        ),
-                      ],
+                      ),
                     ),
-                  ),
-              ],
-
-              if (_hasCoffeeRule) ...[
-                SwitchListTile(
-                  title: const Text('Có tham dự chương trình Coffee Talk'),
-                  value: _isCoffeeTalk,
-                  onChanged: (val) => setState(() => _isCoffeeTalk = val),
-                ),
-                if (_isCoffeeTalk) ...[
-                  Padding(
-                    padding: const EdgeInsets.only(
-                      left: 16.0,
-                      right: 16.0,
-                      bottom: 12.0,
+                    const SizedBox(height: 8),
+                    TextField(
+                      controller: _practicalController,
+                      maxLines: 4,
+                      decoration: const InputDecoration(
+                        labelText: 'Thực tế áp dụng (Tối thiểu 50 từ)',
+                        border: OutlineInputBorder(),
+                      ),
                     ),
-                    child: Column(
-                      children: [
-                        TextField(
-                          controller: _coffeeTalkNameController,
-                          decoration: const InputDecoration(
-                            labelText: 'Tên chương trình Coffee Talk',
-                            border: OutlineInputBorder(),
-                          ),
-                        ),
-                        const SizedBox(height: 12),
-                        TextField(
-                          controller: _coffeeTalkLearningsController,
-                          maxLines: 2,
-                          decoration: const InputDecoration(
-                            labelText: 'Nội dung tâm đắc nhất',
-                            border: OutlineInputBorder(),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              ],
-
-              if (_hasSpeakerRule) ...[
-                SwitchListTile(
-                  title: const Text(
-                    'Là Diễn giả / Người chia sẻ tại Coffee Talk',
-                  ),
-                  value: _isSpeaker,
-                  onChanged: (val) => setState(() => _isSpeaker = val),
-                ),
-                if (_isSpeaker)
-                  Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 16.0,
-                      vertical: 8.0,
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Text(
-                          '(Ví dụ: Thư mời làm diễn giả, slide nội dung đã thuyết trình, hoặc ảnh chụp đang chia sẻ)',
+                    Align(
+                      alignment: Alignment.centerRight,
+                      child: Padding(
+                        padding: const EdgeInsets.only(top: 4, right: 4),
+                        child: Text(
+                          _practicalWordCount < 50
+                              ? 'Đã viết $_practicalWordCount từ (Cần thêm ${50 - _practicalWordCount} từ)'
+                              : 'Đã viết $_practicalWordCount từ (Đạt yêu cầu)',
                           style: TextStyle(
-                            fontSize: 13,
-                            fontStyle: FontStyle.italic,
-                            color: Colors.grey,
+                            fontSize: 12,
+                            fontWeight: FontWeight.bold,
+                            color: _practicalWordCount < 50
+                                ? Colors.red
+                                : Colors.green.shade700,
                           ),
                         ),
-                        const SizedBox(height: 8),
-                        _buildMultiUploadSection(
-                          title: 'Tải lên minh chứng diễn giả (Bắt buộc)',
-                          maxImages: _maxSpeakerKnsImages,
-                          attachmentsList: _speakerEvidenceAttachments,
-                          allowedExtensions: [
-                            'jpg',
-                            'jpeg',
-                            'png',
-                            'pdf',
-                            'doc',
-                            'docx',
-                            'ppt',
-                            'pptx',
-                          ],
-                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    const Text(
+                      'Đối với file Video hoặc file dung lượng lớn, vui lòng upload lên Google Drive cá nhân và dán link chia sẻ vào ô bên dưới.',
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontStyle: FontStyle.italic,
+                        color: Colors.grey,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    TextField(
+                      controller: _driveLinkController,
+                      decoration: const InputDecoration(
+                        labelText: 'Link Google Drive minh chứng (nếu có)',
+                        border: OutlineInputBorder(),
+                        prefixIcon: Icon(Icons.link),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    _buildMultiUploadSection(
+                      title: 'Tải lên minh chứng ứng dụng',
+                      maxImages: _isKNS ? _maxAppKnsImages : _maxAppTscImages,
+                      attachmentsList: _appEvidenceAttachments,
+                      allowedExtensions: [
+                        'jpg',
+                        'jpeg',
+                        'png',
+                        'pdf',
+                        'doc',
+                        'docx',
+                        'xls',
+                        'xlsx',
                       ],
                     ),
+                    if (_isKNS &&
+                        _appEvidenceAttachments.isEmpty &&
+                        _driveLinkController.text.isEmpty)
+                      const Padding(
+                        padding: EdgeInsets.only(top: 4.0),
+                        child: Text(
+                          '* Bắt buộc phải có minh chứng (File hoặc Link Drive)',
+                          style: TextStyle(color: Colors.red, fontSize: 12),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+
+            // MỤC 2, 3, 4 DÀNH RIÊNG CHO KNS
+            if (_isKNS && _hasShareRule) ...[
+              SwitchListTile(
+                title: const Text(
+                  'Đã chia sẻ kiến thức trong Group chung',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+                value: _isSharedGroup,
+                onChanged: (val) => setState(() => _isSharedGroup = val),
+              ),
+              if (_isSharedGroup)
+                Padding(
+                  padding: const EdgeInsets.only(
+                    left: 16.0,
+                    right: 16.0,
+                    bottom: 24.0,
+                    top: 8.0,
                   ),
-              ],
-              const SizedBox(height: 24),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Vui lòng tải lên ảnh chụp màn hình chứng minh bạn đã chia sẻ bài học.',
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontStyle: FontStyle.italic,
+                          color: Colors.grey,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      _buildMultiUploadSection(
+                        title: 'Tải lên ảnh chụp chia sẻ (Bắt buộc)',
+                        maxImages: _maxShareKnsImages,
+                        attachmentsList: _groupShareAttachments,
+                        allowedExtensions: ['jpg', 'jpeg', 'png'],
+                      ),
+                    ],
+                  ),
+                ),
             ],
+
+            if (_isKNS && _hasCoffeeRule) ...[
+              SwitchListTile(
+                title: const Text(
+                  'Có tham dự chương trình Coffee Talk',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+                value: _isCoffeeTalk,
+                onChanged: (val) => setState(() => _isCoffeeTalk = val),
+              ),
+              if (_isCoffeeTalk)
+                Padding(
+                  padding: const EdgeInsets.only(
+                    left: 16.0,
+                    right: 16.0,
+                    bottom: 24.0,
+                    top: 8.0,
+                  ),
+                  child: Column(
+                    children: [
+                      TextField(
+                        controller: _coffeeTalkNameController,
+                        decoration: const InputDecoration(
+                          labelText: 'Tên chương trình Coffee Talk',
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: _coffeeTalkLearningsController,
+                        maxLines: 2,
+                        decoration: const InputDecoration(
+                          labelText: 'Nội dung tâm đắc nhất',
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+            ],
+
+            if (_isKNS && _hasSpeakerRule) ...[
+              SwitchListTile(
+                title: const Text(
+                  'Là Diễn giả / Người chia sẻ tại Coffee Talk',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+                value: _isSpeaker,
+                onChanged: (val) => setState(() => _isSpeaker = val),
+              ),
+              if (_isSpeaker)
+                Padding(
+                  padding: const EdgeInsets.only(
+                    left: 16.0,
+                    right: 16.0,
+                    bottom: 24.0,
+                    top: 8.0,
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        '(Ví dụ: Thư mời làm diễn giả, slide nội dung đã thuyết trình, hoặc ảnh chụp đang chia sẻ)',
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontStyle: FontStyle.italic,
+                          color: Colors.grey,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      _buildMultiUploadSection(
+                        title: 'Tải lên minh chứng diễn giả (Bắt buộc)',
+                        maxImages: _maxSpeakerKnsImages,
+                        attachmentsList: _speakerEvidenceAttachments,
+                        allowedExtensions: [
+                          'jpg',
+                          'jpeg',
+                          'png',
+                          'pdf',
+                          'doc',
+                          'docx',
+                          'ppt',
+                          'pptx',
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+            ],
+            const SizedBox(height: 12),
 
             SizedBox(
               width: double.infinity,

@@ -122,7 +122,10 @@ class _QuickLogWidgetState extends State<QuickLogWidget> {
           }
 
           // Tự động format tên chặng kèm thời gian thực tế từ DB cho Dropdown
-          _phaseDataList = List<Map<String, dynamic>>.from(periodsRes).map((p) {
+          _phaseDataList = [];
+          final now = DateTime.now();
+
+          for (var p in List<Map<String, dynamic>>.from(periodsRes)) {
             Map<String, dynamic> period = Map<String, dynamic>.from(p);
             String rawName = period['period_name'] ?? '';
             String baseName = rawName
@@ -132,15 +135,19 @@ class _QuickLogWidgetState extends State<QuickLogWidget> {
             DateTime? sDate = DateTime.tryParse(period['start_date'] ?? '');
             DateTime? eDate = DateTime.tryParse(period['end_date'] ?? '');
 
+            // Bỏ qua (ẩn) các chặng chưa đến thời gian bắt đầu
+            if (sDate != null && now.isBefore(sDate)) {
+              continue;
+            }
+
             if (sDate != null && eDate != null) {
               period['period_name'] =
                   '$baseName (${sDate.day}/${sDate.month} - ${eDate.day}/${eDate.month})';
             } else {
               period['period_name'] = baseName;
             }
-            return period;
-          }).toList();
-
+            _phaseDataList.add(period);
+          }
           _phaseList = _phaseDataList
               .map((e) => e['period_name'] as String)
               .toList();
@@ -215,6 +222,21 @@ class _QuickLogWidgetState extends State<QuickLogWidget> {
     });
   }
 
+  // Hàm tự động gợi ý Chặng phù hợp dựa trên ngày hoàn thành người dùng chọn
+  String? _suggestPhaseForDate(DateTime date) {
+    for (var p in _phaseDataList) {
+      final s = DateTime.tryParse(p['start_date'] ?? '');
+      final e = DateTime.tryParse(p['end_date'] ?? '');
+      if (s != null && e != null) {
+        if (date.isAfter(s.subtract(const Duration(days: 1))) &&
+            date.isBefore(e.add(const Duration(days: 1)))) {
+          return p['period_name'];
+        }
+      }
+    }
+    return null;
+  }
+
   // Hiển thị gợi ý chuyển sang form Kê khai ứng dụng
   void _showApplicationPrompt(String savedCourse) {
     showDialog(
@@ -281,10 +303,88 @@ class _QuickLogWidgetState extends State<QuickLogWidget> {
       );
       return;
     }
+
+    // --- KIỂM TRA MÔ THUẪN GIỮA "NGÀY HOÀN THÀNH" VÀ "CHẶNG" ---
+    final selectedPhaseConfig = _phaseDataList.firstWhere(
+      (p) => p['period_name'] == _selectedPhase,
+      orElse: () => {},
+    );
+
+    if (selectedPhaseConfig.isNotEmpty) {
+      final sDate = DateTime.tryParse(selectedPhaseConfig['start_date'] ?? '');
+      final eDate = DateTime.tryParse(selectedPhaseConfig['end_date'] ?? '');
+
+      if (sDate != null && eDate != null) {
+        bool isDateInPhase =
+            _completionDate.isAfter(sDate.subtract(const Duration(days: 1))) &&
+            _completionDate.isBefore(eDate.add(const Duration(days: 1)));
+
+        if (!isDateInPhase) {
+          // Ngày hoàn thành nằm ngoài Chặng đã chọn -> Chặn lại và gợi ý
+          String? suggestedPhase = _suggestPhaseForDate(_completionDate);
+
+          if (!mounted) return;
+          showDialog(
+            context: context,
+            builder: (ctx) => AlertDialog(
+              title: const Row(
+                children: [
+                  Icon(Icons.event_busy, color: Colors.orange),
+                  SizedBox(width: 8),
+                  Text('Sai lệch thời gian'),
+                ],
+              ),
+              content: Text(
+                'Ngày hoàn thành bạn chọn (${_completionDate.day}/${_completionDate.month}/${_completionDate.year}) KHÔNG NẰM TRONG thời gian của ${_selectedPhase!.split(' (').first}.\n\n'
+                '${suggestedPhase != null ? '💡 Gợi ý: Với ngày hoàn thành này, bạn nên chọn chặng "$suggestedPhase".' : 'Vui lòng kiểm tra lại Ngày hoàn thành hoặc chọn lại Chặng phù hợp để đảm bảo điểm số được tính chính xác.'}',
+                style: const TextStyle(height: 1.5),
+              ),
+              actions: [
+                if (suggestedPhase != null)
+                  TextButton(
+                    onPressed: () {
+                      Navigator.pop(ctx);
+                      setState(() {
+                        _selectedPhase = suggestedPhase;
+                        _checkLatePhase(_selectedPhase);
+                      });
+                    },
+                    child: const Text(
+                      'Tự động đổi Chặng',
+                      style: TextStyle(
+                        color: Colors.blue,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                ElevatedButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.orange,
+                  ),
+                  child: const Text('Tôi sẽ sửa lại ngày'),
+                ),
+              ],
+            ),
+          );
+          return; // Dừng việc lưu vào DB
+        }
+      }
+    }
+    // -------------------------------------------------------------
+
     setState(() => _isSaving = true);
 
     try {
       final user = Supabase.instance.client.auth.currentUser;
+
+      // Bóc tách tên chặng gốc (loại bỏ phần ngày tháng trong ngoặc) để lưu chuẩn vào DB
+      String dbPhaseBatch = _selectedPhase ?? '';
+      if (dbPhaseBatch.contains(' (')) {
+        dbPhaseBatch = dbPhaseBatch
+            .substring(0, dbPhaseBatch.indexOf(' ('))
+            .trim();
+      }
 
       // 1. Insert giờ học trước để lấy ID (Dùng .select().single() để lấy dòng vừa tạo)
       final insertedRow = await Supabase.instance.client
@@ -293,7 +393,8 @@ class _QuickLogWidgetState extends State<QuickLogWidget> {
             'user_id': user?.id,
             'course_name': course,
             'duration_minutes': _totalCalculatedMinutes,
-            'phase_batch': _selectedPhase,
+            'phase_batch':
+                dbPhaseBatch, // Đã lưu chuẩn tên (Ví dụ: Chặng 1 thay vì Chặng 1 (1/5 - 30/6))
             'platform': finalPlatform,
             'completion_date': _completionDate.toIso8601String(),
             'evidence_file_name': _selectedAttachments.isNotEmpty

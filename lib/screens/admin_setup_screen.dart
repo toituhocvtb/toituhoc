@@ -32,9 +32,16 @@ class _AdminSetupScreenState extends State<AdminSetupScreen> {
           .order('config_name');
       if (mounted) {
         setState(() {
+          _configs.clear(); // Xóa data cũ trước khi nạp mới
+          _configNames.clear();
           for (var row in res) {
-            _configs[row['config_key']] = row['config_value'] as int;
-            _configNames[row['config_key']] = row['config_name'] as String;
+            final String key = row['config_key']?.toString() ?? '';
+            if (key.isEmpty) continue; // Bỏ qua nếu key lỗi
+
+            // Ép kiểu an toàn (Safe parsing) để tránh crash do dữ liệu null hoặc sai type
+            _configs[key] =
+                int.tryParse(row['config_value']?.toString() ?? '0') ?? 0;
+            _configNames[key] = row['config_name']?.toString() ?? key;
           }
         });
       }
@@ -679,11 +686,19 @@ class _AdminSetupScreenState extends State<AdminSetupScreen> {
     );
   }
 
-  // Hiển thị dialog để sửa cấu hình số lượng ảnh
+  // Hiển thị dialog để sửa cấu hình số lượng ảnh (Render Động 100% từ DB)
   Future<void> _showEditConfigsDialog() async {
-    List<String> keys = _configs.keys.toList();
-    List<TextEditingController> controllers = keys.map((k) {
-      return TextEditingController(text: _configs[k].toString());
+    // Tải trực tiếp từ DB để đảm bảo luôn có dữ liệu mới nhất (giống cấu hình điểm)
+    final res = await Supabase.instance.client
+        .from('system_configs')
+        .select()
+        .order('config_name');
+
+    List<Map<String, dynamic>> dynamicConfigs = List<Map<String, dynamic>>.from(
+      res,
+    );
+    List<TextEditingController> controllers = dynamicConfigs.map((row) {
+      return TextEditingController(text: (row['config_value'] ?? 0).toString());
     }).toList();
 
     if (!mounted) return;
@@ -693,65 +708,77 @@ class _AdminSetupScreenState extends State<AdminSetupScreen> {
         return AlertDialog(
           title: const Text('Cấu hình Số lượng ảnh tối đa'),
           content: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: List.generate(keys.length, (index) {
-                return Padding(
-                  padding: const EdgeInsets.only(bottom: 12.0),
-                  child: TextField(
-                    controller: controllers[index],
-                    decoration: InputDecoration(
-                      labelText: _configNames[keys[index]],
-                      border: const OutlineInputBorder(),
+            child: dynamicConfigs.isEmpty
+                ? const Padding(
+                    padding: EdgeInsets.all(16.0),
+                    child: Text(
+                      'Không tìm thấy dữ liệu. Hãy kiểm tra:\n1. Có đang chạy nhầm bản build cũ lỗi (chưa chạy flutter clean)?\n2. Bảng system_configs trên Supabase có bị khóa RLS không?',
+                      style: TextStyle(color: Colors.red, height: 1.5),
                     ),
-                    keyboardType: TextInputType.number,
+                  )
+                : Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: List.generate(dynamicConfigs.length, (index) {
+                      return Padding(
+                        padding: const EdgeInsets.only(bottom: 12.0),
+                        child: TextField(
+                          controller: controllers[index],
+                          decoration: InputDecoration(
+                            labelText:
+                                dynamicConfigs[index]['config_name'] ??
+                                dynamicConfigs[index]['config_key'],
+                            border: const OutlineInputBorder(),
+                          ),
+                          keyboardType: TextInputType.number,
+                        ),
+                      );
+                    }),
                   ),
-                );
-              }),
-            ),
           ),
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(ctx),
               child: const Text('Hủy'),
             ),
-            ElevatedButton(
-              onPressed: () async {
-                Navigator.pop(ctx);
-                try {
-                  List<Map<String, dynamic>> updates = [];
-                  for (int i = 0; i < keys.length; i++) {
-                    updates.add({
-                      'config_key': keys[i],
-                      'config_value': int.tryParse(controllers[i].text) ?? 1,
-                    });
+            if (dynamicConfigs.isNotEmpty)
+              ElevatedButton(
+                onPressed: () async {
+                  Navigator.pop(ctx);
+                  try {
+                    List<Map<String, dynamic>> updates = [];
+                    for (int i = 0; i < dynamicConfigs.length; i++) {
+                      updates.add({
+                        'config_key': dynamicConfigs[i]['config_key'],
+                        'config_name': dynamicConfigs[i]['config_name'],
+                        'config_value': int.tryParse(controllers[i].text) ?? 1,
+                      });
+                    }
+
+                    await Supabase.instance.client
+                        .from('system_configs')
+                        .upsert(updates);
+
+                    await _fetchConfigs(); // Làm mới thẻ cấu hình ở màn hình ngoài
+
+                    if (!mounted) return;
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('Lưu cấu hình ảnh thành công!'),
+                        backgroundColor: Colors.green,
+                      ),
+                    );
+                  } catch (e) {
+                    if (!mounted) return;
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text('Lỗi cập nhật: $e'),
+                        backgroundColor: Colors.red,
+                      ),
+                    );
                   }
-
-                  await Supabase.instance.client
-                      .from('system_configs')
-                      .upsert(updates);
-
-                  await _fetchConfigs(); // Làm mới thẻ cấu hình
-
-                  if (!mounted) return;
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text('Lưu cấu hình ảnh thành công!'),
-                      backgroundColor: Colors.green,
-                    ),
-                  );
-                } catch (e) {
-                  if (!mounted) return;
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: Text('Lỗi cập nhật: $e'),
-                      backgroundColor: Colors.red,
-                    ),
-                  );
-                }
-              },
-              child: const Text('Lưu thay đổi'),
-            ),
+                },
+                child: const Text('Lưu thay đổi'),
+              ),
           ],
         );
       },
@@ -1135,95 +1162,101 @@ class _AdminSetupScreenState extends State<AdminSetupScreen> {
                             ],
                           ),
                           // Chồng các nút lên nhau bằng Column để thu gọn không gian
-                          trailing: Column(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              SizedBox(
-                                height: 24,
-                                child: Tooltip(
-                                  message: 'Bật/Tắt làm chặng mặc định cho BXH',
-                                  child: Switch(
-                                    value: isActive,
-                                    onChanged: (val) =>
-                                        _confirmToggleActive(item, isActive),
-                                    activeThumbColor: isAlert
-                                        ? Colors.red
-                                        : Colors.green,
-                                    activeTrackColor: isAlert
-                                        ? Colors.red.shade200
-                                        : Colors.green.shade300,
+                          trailing: FittedBox(
+                            fit: BoxFit.scaleDown,
+                            child: Column(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                SizedBox(
+                                  height: 24,
+                                  child: Tooltip(
+                                    message:
+                                        'Bật/Tắt làm chặng mặc định cho BXH',
+                                    child: Switch(
+                                      value: isActive,
+                                      onChanged: (val) =>
+                                          _confirmToggleActive(item, isActive),
+                                      activeThumbColor: isAlert
+                                          ? Colors.red
+                                          : Colors.green,
+                                      activeTrackColor: isAlert
+                                          ? Colors.red.shade200
+                                          : Colors.green.shade300,
+                                    ),
                                   ),
                                 ),
-                              ),
-                              const SizedBox(height: 8),
-                              Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  SizedBox(
-                                    width: 32,
-                                    height: 32,
-                                    child: IconButton(
-                                      padding: EdgeInsets.zero,
-                                      icon: const Icon(
-                                        Icons.edit,
-                                        color: Colors.blue,
-                                        size: 20,
+                                const SizedBox(height: 8),
+                                Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    SizedBox(
+                                      width: 32,
+                                      height: 32,
+                                      child: IconButton(
+                                        padding: EdgeInsets.zero,
+                                        icon: const Icon(
+                                          Icons.edit,
+                                          color: Colors.blue,
+                                          size: 20,
+                                        ),
+                                        tooltip: 'Sửa thời gian',
+                                        onPressed: () =>
+                                            _checkAndShowEditDialog(item),
                                       ),
-                                      tooltip: 'Sửa thời gian',
-                                      onPressed: () =>
-                                          _checkAndShowEditDialog(item),
                                     ),
-                                  ),
-                                  SizedBox(
-                                    width: 32,
-                                    height: 32,
-                                    child: IconButton(
-                                      padding: EdgeInsets.zero,
-                                      icon: const Icon(
-                                        Icons.delete,
-                                        color: Colors.red,
-                                        size: 20,
-                                      ),
-                                      tooltip: 'Xóa đợt',
-                                      onPressed: () {
-                                        showDialog(
-                                          context: context,
-                                          builder: (ctx) => AlertDialog(
-                                            title: const Text('Xác nhận xóa'),
-                                            content: Text(
-                                              'Bạn có chắc muốn xóa đợt "${item['period_name']}" không?',
-                                            ),
-                                            actions: [
-                                              TextButton(
-                                                onPressed: () =>
-                                                    Navigator.pop(ctx),
-                                                child: const Text('Hủy'),
+                                    SizedBox(
+                                      width: 32,
+                                      height: 32,
+                                      child: IconButton(
+                                        padding: EdgeInsets.zero,
+                                        icon: const Icon(
+                                          Icons.delete,
+                                          color: Colors.red,
+                                          size: 20,
+                                        ),
+                                        tooltip: 'Xóa đợt',
+                                        onPressed: () {
+                                          showDialog(
+                                            context: context,
+                                            builder: (ctx) => AlertDialog(
+                                              title: const Text('Xác nhận xóa'),
+                                              content: Text(
+                                                'Bạn có chắc muốn xóa đợt "${item['period_name']}" không?',
                                               ),
-                                              ElevatedButton(
-                                                onPressed: () {
-                                                  Navigator.pop(ctx);
-                                                  _deletePeriod(item['id']);
-                                                },
-                                                style: ElevatedButton.styleFrom(
-                                                  backgroundColor: Colors.red,
+                                              actions: [
+                                                TextButton(
+                                                  onPressed: () =>
+                                                      Navigator.pop(ctx),
+                                                  child: const Text('Hủy'),
                                                 ),
-                                                child: const Text(
-                                                  'Xóa',
-                                                  style: TextStyle(
-                                                    color: Colors.white,
+                                                ElevatedButton(
+                                                  onPressed: () {
+                                                    Navigator.pop(ctx);
+                                                    _deletePeriod(item['id']);
+                                                  },
+                                                  style:
+                                                      ElevatedButton.styleFrom(
+                                                        backgroundColor:
+                                                            Colors.red,
+                                                      ),
+                                                  child: const Text(
+                                                    'Xóa',
+                                                    style: TextStyle(
+                                                      color: Colors.white,
+                                                    ),
                                                   ),
                                                 ),
-                                              ),
-                                            ],
-                                          ),
-                                        );
-                                      },
+                                              ],
+                                            ),
+                                          );
+                                        },
+                                      ),
                                     ),
-                                  ),
-                                ],
-                              ),
-                            ],
+                                  ],
+                                ),
+                              ],
+                            ),
                           ),
                         ),
                       );

@@ -112,6 +112,11 @@ class _ReportScreenState extends State<ReportScreen> {
         DateTime? sDate = DateTime.tryParse(p['start_date'] ?? '');
         DateTime? eDate = DateTime.tryParse(p['end_date'] ?? '');
 
+        // Bỏ qua (ẩn) các chặng chưa đến thời gian bắt đầu
+        if (sDate != null && now.isBefore(sDate)) {
+          continue;
+        }
+
         // Chỉ gắn nhãn (Đang Active) và làm mặc định nếu Admin mở VÀ ngày hiện tại thực sự nằm trong chặng
         if (p['is_active'] == true && sDate != null && eDate != null) {
           if (now.isAfter(sDate.subtract(const Duration(days: 1))) &&
@@ -172,7 +177,10 @@ class _ReportScreenState extends State<ReportScreen> {
       try {
         final hoursRes = await Supabase.instance.client
             .from('learning_hours')
-            .select('id, course_name, duration_minutes, platform, created_at')
+            // Bổ sung completion_date để xếp chặng chính xác
+            .select(
+              'id, course_name, duration_minutes, platform, created_at, completion_date',
+            )
             .eq('user_id', userId)
             .order('created_at', ascending: false);
         _learningHistory = hoursRes;
@@ -184,8 +192,9 @@ class _ReportScreenState extends State<ReportScreen> {
       try {
         final appsRes = await Supabase.instance.client
             .from('practical_applications')
+            // Lấy thêm id, ai_score và các cờ KNS để render UI chi tiết điểm
             .select(
-              'course_name, gamification_points, created_at, key_learnings, practical_results, ai_feedback',
+              'id, course_name, gamification_points, ai_score, is_shared_group, coffee_talk_name, is_speaker, created_at, key_learnings, practical_results, ai_feedback',
             )
             .eq('user_id', userId)
             .order('created_at', ascending: false);
@@ -193,7 +202,6 @@ class _ReportScreenState extends State<ReportScreen> {
       } catch (e) {
         debugPrint('Lỗi lấy ứng dụng: $e');
       }
-
       if (mounted) {
         setState(() => _isLoadingHistory = false);
       }
@@ -322,137 +330,121 @@ class _ReportScreenState extends State<ReportScreen> {
     );
   }
 
-  // Hàm gom dữ liệu 1 lần duy nhất từ Server để tối ưu
+  // Hàm gom dữ liệu 1 lần duy nhất bằng Bảng Ảo (Siêu nhẹ, siêu tiết kiệm token)
   Future<void> _aggregateLeaderboardData(List<dynamic> allPeriodsConfig) async {
-    final profiles = await Supabase.instance.client
-        .from('profiles')
-        .select(
-          'id, full_name, division, department_id, role, departments!profiles_department_id_fkey(department_name)',
-        );
-
-    final apps = await Supabase.instance.client
-        .from('practical_applications')
-        .select(
-          'user_id, gamification_points, is_shared_group, coffee_talk_name, is_speaker, created_at, evidence_url',
-        );
-
-    final hours = await Supabase.instance.client
-        .from('learning_hours')
-        .select('user_id, duration_minutes, created_at, evidence_url');
-
-    Map<String, Map<String, dynamic>> userStats = {};
-    for (var p in profiles) {
-      // Lấy tên phòng từ bảng departments (join), nếu không có thì fallback về ID
-      String deptName = p['department_id']?.toString() ?? '';
-      if (p['departments'] != null &&
-          p['departments']['department_name'] != null) {
-        deptName = p['departments']['department_name'].toString();
-      }
-
-      userStats[p['id']] = {
-        'id': p['id'],
-        'name': p['full_name'] ?? 'Ẩn danh',
-        'division': p['division'] ?? '',
-        'department_id': p['department_id'],
-        'department_name': deptName, // Thêm tên phòng
-        'role': p['role'] ?? 'tsc',
-        'total_points': 0, 'total_hours': 0,
-        'active_points': 0, 'active_hours': 0,
-        'period_points': 0, 'period_hours': 0,
-        // Cột phụ cho xuất báo cáo
-        'products': 0, 'shares': 0, 'coffee': 0, 'speakers': 0,
-      };
+    List<dynamic> events = [];
+    int start = 0;
+    while (true) {
+      final res = await Supabase.instance.client
+          .from('v_leaderboard_events')
+          .select()
+          .range(start, start + 999);
+      events.addAll(res);
+      if (res.length < 1000) break;
+      start += 1000;
     }
 
-    // Xử lý Điểm
-    for (var app in apps) {
-      String uid = app['user_id'];
-      if (userStats.containsKey(uid)) {
-        int pts = (app['gamification_points'] as num?)?.toInt() ?? 0;
-        DateTime? date = DateTime.tryParse(app['created_at'] ?? '');
+    Map<String, Map<String, dynamic>> userStats = {};
 
+    // Khởi tạo data của chính mình để tránh lỗi (dù chưa có điểm)
+    final myProfile = await Supabase.instance.client
+        .from('profiles')
+        .select(
+          'full_name, division, department_id, role, departments!profiles_department_id_fkey(department_name)',
+        )
+        .eq('id', _userId)
+        .maybeSingle();
+
+    String myDeptName = '';
+    if (myProfile != null && myProfile['departments'] != null) {
+      myDeptName = myProfile['departments']['department_name'] ?? '';
+    }
+
+    userStats[_userId] = {
+      'id': _userId,
+      'name': myProfile != null ? (myProfile['full_name'] ?? 'Tôi') : 'Tôi',
+      'division': _userDivision,
+      'department_id': _userDeptId,
+      'department_name': myDeptName,
+      'role': _userRole,
+      'total_points': 0,
+      'total_hours': 0,
+      'active_points': 0,
+      'active_hours': 0,
+      'period_points': 0,
+      'period_hours': 0,
+      'products': 0,
+      'shares': 0,
+      'coffee': 0,
+      'speakers': 0,
+      'raw_app_dates': [],
+      'raw_hour_dates': [],
+    };
+
+    // Quét trực tiếp các sự kiện từ bảng ảo đã được thu gọn
+    for (var ev in events) {
+      String uid = ev['user_id']?.toString() ?? '';
+      if (uid.isEmpty) continue;
+
+      if (!userStats.containsKey(uid)) {
+        userStats[uid] = {
+          'id': uid,
+          'name': ev['name'] ?? 'Ẩn danh',
+          'division': ev['division'] ?? '',
+          'department_id': ev['department_id'],
+          'department_name': ev['department_name'] ?? '',
+          'role': ev['role'] ?? 'tsc',
+          'total_points': 0,
+          'total_hours': 0,
+          'active_points': 0,
+          'active_hours': 0,
+          'period_points': 0,
+          'period_hours': 0,
+          'products': 0,
+          'shares': 0,
+          'coffee': 0,
+          'speakers': 0,
+          'raw_app_dates': [],
+          'raw_hour_dates': [],
+        };
+      }
+
+      int pts = (ev['points'] as num?)?.toInt() ?? 0;
+      int hrs = (ev['hours'] as num?)?.toInt() ?? 0;
+      DateTime? date = DateTime.tryParse(ev['event_date'] ?? '');
+
+      if (pts > 0) {
         userStats[uid]!['total_points'] += pts;
         userStats[uid]!['products'] += 1;
-        if (app['is_shared_group'] == true) userStats[uid]!['shares'] += 1;
-        if (app['is_speaker'] == true) userStats[uid]!['speakers'] += 1;
-        if (app['coffee_talk_name'] != null &&
-            app['coffee_talk_name'].toString().isNotEmpty) {
+        if (ev['is_shared_group'] == true) userStats[uid]!['shares'] += 1;
+        if (ev['is_speaker'] == true) userStats[uid]!['speakers'] += 1;
+        if (ev['coffee_talk_name'] != null &&
+            ev['coffee_talk_name'].toString().trim().isNotEmpty) {
           userStats[uid]!['coffee'] += 1;
         }
 
         if (date != null) {
-          // Tính điểm cho chặng Active
-          final roleConfig = allPeriodsConfig
-              .where(
-                (p) =>
-                    p['target_role'] == userStats[uid]!['role'] &&
-                    p['is_active'] == true,
-              )
-              .toList();
-          if (roleConfig.isNotEmpty) {
-            DateTime? s = DateTime.tryParse(
-              roleConfig.first['start_date'] ?? '',
-            );
-            DateTime? e = DateTime.tryParse(roleConfig.first['end_date'] ?? '');
-            if (s != null &&
-                e != null &&
-                date.isAfter(s.subtract(const Duration(days: 1))) &&
-                date.isBefore(e.add(const Duration(days: 1)))) {
-              userStats[uid]!['active_points'] += pts;
-            }
-          }
-          // Lưu raw date để lát lọc theo từng chặng cụ thể
-          userStats[uid]!['raw_app_dates'] ??= [];
           (userStats[uid]!['raw_app_dates'] as List).add({
             'date': date,
             'val': pts,
+            'evidence_url': ev['evidence_url'],
           });
         }
       }
-    }
 
-    // Xử lý Giờ học
-    for (var h in hours) {
-      String uid = h['user_id'];
-      if (userStats.containsKey(uid)) {
-        int mins = (h['duration_minutes'] as num?)?.toInt() ?? 0;
-        DateTime? date = DateTime.tryParse(h['created_at'] ?? '');
-
-        userStats[uid]!['total_hours'] += mins;
-
+      if (hrs > 0) {
+        userStats[uid]!['total_hours'] += hrs;
         if (date != null) {
-          // Tính giờ cho chặng Active
-          final roleConfig = allPeriodsConfig
-              .where(
-                (p) =>
-                    p['target_role'] == userStats[uid]!['role'] &&
-                    p['is_active'] == true,
-              )
-              .toList();
-          if (roleConfig.isNotEmpty) {
-            DateTime? s = DateTime.tryParse(
-              roleConfig.first['start_date'] ?? '',
-            );
-            DateTime? e = DateTime.tryParse(roleConfig.first['end_date'] ?? '');
-            if (s != null &&
-                e != null &&
-                date.isAfter(s.subtract(const Duration(days: 1))) &&
-                date.isBefore(e.add(const Duration(days: 1)))) {
-              userStats[uid]!['active_hours'] += mins;
-            }
-          }
-          userStats[uid]!['raw_hour_dates'] ??= [];
           (userStats[uid]!['raw_hour_dates'] as List).add({
             'date': date,
-            'val': mins,
+            'val': hrs,
+            'phase_batch': ev['phase_batch'],
           });
         }
       }
     }
 
-    // Nếu chọn 1 chặng cụ thể, ta cần tính lại point/hour tại thời điểm Process
     _allRawData = userStats.values.toList();
-    // Cache lại biến config để dùng trong _processRanking
     _allRawData.add({'config_helper': allPeriodsConfig});
   }
 
@@ -465,52 +457,107 @@ class _ReportScreenState extends State<ReportScreen> {
     // 1. Gán giá trị So sánh dựa trên Period đang chọn
     for (var u in usersOnly) {
       if (_selectedPeriod == 'Toàn chặng (Tích lũy)') {
-        u['sort_points'] = u['total_points'];
+        // 1 phút học = 1 điểm. Cộng tổng giờ vào tổng điểm
+        u['sort_points'] =
+            (u['total_points'] as int) + (u['total_hours'] as int);
         u['sort_hours'] = u['total_hours'];
       } else {
-        // Chặng cụ thể (loại bỏ chuỗi " (Đang Active)" trên giao diện để match chuẩn với Database)
-        String searchPeriodName = _selectedPeriod.replaceAll(
-          ' (Đang Active)',
-          '',
-        );
+        // Cắt triệt để mọi hậu tố thừa: "(Đang Active)" hoặc ngày tháng "(1/5 - 30/6)"
+        String searchPeriodName = _selectedPeriod;
+        if (searchPeriodName.contains(' (')) {
+          searchPeriodName = searchPeriodName
+              .substring(0, searchPeriodName.indexOf(' ('))
+              .trim();
+        }
+
         int periodPts = 0;
         int periodHrs = 0;
+
+        // Trim để tránh lỗi khoảng trắng ẩn trong Database
         final specificConfig = allPeriodsConfig
-            .where((p) => p['period_name'] == searchPeriodName)
+            .where(
+              (p) =>
+                  (p['period_name']?.toString().trim() ?? '') ==
+                  searchPeriodName,
+            )
             .toList();
+
+        DateTime? s;
+        DateTime? e;
         if (specificConfig.isNotEmpty) {
-          DateTime? s = DateTime.tryParse(
-            specificConfig.first['start_date'] ?? '',
-          );
-          DateTime? e = DateTime.tryParse(
-            specificConfig.first['end_date'] ?? '',
-          );
-          if (s != null && e != null) {
-            if (u['raw_app_dates'] != null) {
-              for (var item in (u['raw_app_dates'] as List)) {
-                if (item['date'].isAfter(s.subtract(const Duration(days: 1))) &&
-                    item['date'].isBefore(e.add(const Duration(days: 1)))) {
-                  periodPts += item['val'] as int;
-                }
-              }
-            }
-            if (u['raw_hour_dates'] != null) {
-              for (var item in (u['raw_hour_dates'] as List)) {
-                if (item['date'].isAfter(s.subtract(const Duration(days: 1))) &&
-                    item['date'].isBefore(e.add(const Duration(days: 1)))) {
-                  periodHrs += item['val'] as int;
-                }
-              }
+          s = DateTime.tryParse(specificConfig.first['start_date'] ?? '');
+          e = DateTime.tryParse(specificConfig.first['end_date'] ?? '');
+        }
+
+        // Tính điểm ứng dụng (Vẫn dùng Ngày tháng)
+        if (s != null && e != null && u['raw_app_dates'] != null) {
+          for (var item in (u['raw_app_dates'] as List)) {
+            if (item['date'] != null &&
+                item['date'].isAfter(s.subtract(const Duration(days: 1))) &&
+                item['date'].isBefore(e.add(const Duration(days: 1)))) {
+              periodPts += item['val'] as int;
             }
           }
         }
-        u['sort_points'] = periodPts;
+
+        // Tính giờ học: ưu tiên khớp phase_batch, nhưng luôn dự phòng bằng ngày hoàn thành
+        if (u['raw_hour_dates'] != null) {
+          for (var item in (u['raw_hour_dates'] as List)) {
+            String itemPhaseRaw = item['phase_batch']?.toString().trim() ?? '';
+
+            String cleanItemPhase = itemPhaseRaw.contains(' (')
+                ? itemPhaseRaw.substring(0, itemPhaseRaw.indexOf(' (')).trim()
+                : itemPhaseRaw;
+
+            final bool phaseMatched = cleanItemPhase == searchPeriodName;
+
+            final bool dateMatched =
+                s != null &&
+                e != null &&
+                item['date'] != null &&
+                item['date'].isAfter(s.subtract(const Duration(days: 1))) &&
+                item['date'].isBefore(e.add(const Duration(days: 1)));
+
+            if (phaseMatched || dateMatched) {
+              periodHrs += item['val'] as int;
+            }
+          }
+        }
+
+        // 1 phút học = 1 điểm. Cộng dồn vào điểm ứng dụng!
+        u['sort_points'] = periodPts + periodHrs;
         u['sort_hours'] = periodHrs;
       }
     }
 
-    // 2. Lọc theo Phạm vi (Scope)
+    // 2. Lọc theo Phạm vi (Scope) VÀ Role của Đợt/Chặng
     var filtered = usersOnly.where((u) {
+      // 2.1. Lọc theo Role của Đợt/Chặng đang chọn
+      if (_selectedPeriod != 'Toàn chặng (Tích lũy)') {
+        String searchPeriodName = _selectedPeriod;
+        if (searchPeriodName.contains(' (')) {
+          searchPeriodName = searchPeriodName
+              .substring(0, searchPeriodName.indexOf(' ('))
+              .trim();
+        }
+
+        final specificConfig = allPeriodsConfig
+            .where(
+              (p) =>
+                  (p['period_name']?.toString().trim() ?? '') ==
+                  searchPeriodName,
+            )
+            .toList();
+
+        if (specificConfig.isNotEmpty) {
+          String targetRole = specificConfig.first['target_role'] ?? '';
+          if (u['role'] != targetRole) {
+            return false; // Loại bỏ cán bộ khác Role khỏi BXH của đợt này
+          }
+        }
+      }
+
+      // 2.2. Lọc theo Phạm vi (Scope)
       if (_selectedScope == 'Khối của tôi') {
         return u['division'] == _userDivision;
       }
@@ -520,10 +567,26 @@ class _ReportScreenState extends State<ReportScreen> {
       return true; // Toàn hệ thống
     }).toList();
 
+    debugPrint(
+      '[BXH] period=$_selectedPeriod | scope=$_selectedScope | metric=$_metricIndex | usersOnly=${usersOnly.length}',
+    );
+
+    debugPrint(
+      '[BXH] trước filter: '
+      'withHours=${usersOnly.where((u) => ((u['sort_hours'] ?? 0) as int) > 0).length}, '
+      'withPoints=${usersOnly.where((u) => ((u['sort_points'] ?? 0) as int) > 0).length}',
+    );
+
     // 3. Lọc bỏ những người có điểm/giờ = 0 để BXH không bị loãng
     filtered = filtered.where((u) {
-      return _metricIndex == 0 ? (u['sort_hours'] > 0) : (u['sort_points'] > 0);
+      final h = (u['sort_hours'] as int?) ?? 0;
+      final p = (u['sort_points'] as int?) ?? 0;
+
+      // Cho phép người có điểm HOẶC có giờ học đều được hiển thị để tránh lỗi BXH trắng
+      return h > 0 || p > 0;
     }).toList();
+
+    debugPrint('[BXH] sau filter: ${filtered.length}');
 
     // 4. Sắp xếp theo Tiêu chí (Giờ học hoặc Điểm)
     if (_metricIndex == 0) {
@@ -722,6 +785,56 @@ class _ReportScreenState extends State<ReportScreen> {
   }
 
   Future<void> _deleteLearningRecord(String recordId, String courseName) async {
+    // BƯỚC 1: KIỂM TRA XEM KHÓA HỌC NÀY ĐÃ CÓ ỨNG DỤNG ĐI KÈM CHƯA
+    setState(() => _isLoadingHistory = true);
+    List<dynamic> linkedApps = [];
+    try {
+      linkedApps = await Supabase.instance.client
+          .from('practical_applications')
+          .select('id, created_at')
+          .eq('user_id', _userId)
+          .eq('course_name', courseName);
+    } catch (e) {
+      debugPrint('Lỗi check app liên kết: $e');
+    }
+    setState(() => _isLoadingHistory = false);
+
+    // BƯỚC 2: NẾU CÓ ỨNG DỤNG -> CHẶN XÓA VÀ HƯỚNG DẪN UI/UX
+    if (linkedApps.isNotEmpty) {
+      if (!mounted) return;
+      showDialog(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Row(
+            children: [
+              Icon(Icons.warning_amber_rounded, color: Colors.orange),
+              SizedBox(width: 8),
+              Text('Không thể xóa khóa học'),
+            ],
+          ),
+          content: Text(
+            'Khóa học "$courseName" hiện đang có ${linkedApps.length} bản kê khai "Sản phẩm Ứng dụng" đi kèm.\n\n'
+            'Để đảm bảo tính toàn vẹn dữ liệu, vui lòng chuyển sang tab "Sản phẩm Ứng dụng" để xóa các bài ứng dụng của khóa này trước, sau đó bạn mới có thể xóa khóa học.',
+            style: const TextStyle(height: 1.5),
+          ),
+          actions: [
+            ElevatedButton(
+              onPressed: () {
+                Navigator.pop(ctx);
+                setState(
+                  () => _historyMetricIndex = 1,
+                ); // Tự động chuyển tab sang Ứng dụng để user xóa
+              },
+              child: const Text('Chuyển sang Tab Ứng dụng'),
+            ),
+          ],
+        ),
+      );
+      return;
+    }
+
+    // BƯỚC 3: NẾU KHÔNG CÓ ỨNG DỤNG -> XÓA BÌNH THƯỜNG
+    if (!mounted) return;
     final confirm = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -754,7 +867,6 @@ class _ReportScreenState extends State<ReportScreen> {
           .delete()
           .eq('id', recordId);
 
-      // Xóa thành công thì tải lại toàn bộ Data để Cập nhật BXH và Lịch sử
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
@@ -769,12 +881,70 @@ class _ReportScreenState extends State<ReportScreen> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Lỗi khi xóa: $e'),
+            content: Text('Lỗi khi xóa: $e. Hãy kiểm tra phân quyền RLS.'),
             backgroundColor: Colors.red,
           ),
         );
       }
     }
+  }
+
+  // Thêm hàm xóa Ứng dụng để hỗ trợ luồng xóa ở Tab Ứng dụng
+  Future<void> _deleteAppRecord(String recordId, String courseName) async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Xác nhận xóa ứng dụng'),
+        content: Text(
+          'Bạn có chắc muốn xóa bản kê khai ứng dụng của khóa "$courseName"?\nĐiểm thưởng của bạn sẽ bị thu hồi.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Hủy'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Xóa', style: TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm != true) return;
+
+    setState(() => _isLoadingHistory = true);
+    try {
+      await Supabase.instance.client
+          .from('practical_applications')
+          .delete()
+          .eq('id', recordId);
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Đã xóa ứng dụng thành công'),
+            backgroundColor: Colors.green,
+          ),
+        );
+        _fetchInitialData();
+      }
+    } catch (e) {
+      setState(() => _isLoadingHistory = false);
+      if (mounted) {
+        // Thêm ngoặc nhọn
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Lỗi: $e'), backgroundColor: Colors.red),
+        );
+      } // Đóng ngoặc nhọn
+    }
+  }
+
+  String _emptyRankingMessage() {
+    if (_metricIndex == 0) {
+      return 'Chưa có dữ liệu giờ học trong chặng/phạm vi này.';
+    }
+    return 'Chưa có điểm ứng dụng trong chặng/phạm vi này. Dữ liệu giờ học không được tính vào BXH điểm.';
   }
 
   @override
@@ -874,13 +1044,16 @@ class _ReportScreenState extends State<ReportScreen> {
                               )
                             : Builder(
                                 builder: (context) {
-                                  // 1. Phân nhóm dữ liệu theo chặng
+                                  // --- TAB 1: GIỜ HỌC (Nhóm theo Thời gian hoàn thành - completion_date) ---
                                   Map<String, List<dynamic>> groupedItems = {};
                                   String activePeriodName = "";
 
                                   for (var item in _learningHistory) {
+                                    // Ưu tiên completion_date (Thời gian học viên khai báo trên Quicklog), nếu null mới dùng created_at
                                     DateTime? date = DateTime.tryParse(
-                                      item['created_at'] ?? '',
+                                      item['completion_date'] ??
+                                          item['created_at'] ??
+                                          '',
                                     );
                                     String periodName =
                                         "Khác (Ngoài thời gian thi đua)";
@@ -894,7 +1067,6 @@ class _ReportScreenState extends State<ReportScreen> {
                                         DateTime? eDate = DateTime.tryParse(
                                           p['end_date'] ?? '',
                                         );
-
                                         if (sDate != null && eDate != null) {
                                           if (date.isAfter(
                                                 sDate.subtract(
@@ -922,18 +1094,35 @@ class _ReportScreenState extends State<ReportScreen> {
                                         .add(item);
                                   }
 
-                                  // 2. Sắp xếp: Ưu tiên chặng Active lên đỉnh
+                                  // Sắp xếp khóa học bên trong từng chặng: Mới nhất lên đầu
+                                  groupedItems.forEach((key, list) {
+                                    list.sort((a, b) {
+                                      DateTime dateA =
+                                          DateTime.tryParse(
+                                            a['completion_date'] ??
+                                                a['created_at'] ??
+                                                '',
+                                          ) ??
+                                          DateTime(2000);
+                                      DateTime dateB =
+                                          DateTime.tryParse(
+                                            b['completion_date'] ??
+                                                b['created_at'] ??
+                                                '',
+                                          ) ??
+                                          DateTime(2000);
+                                      return dateB.compareTo(dateA); // Giảm dần
+                                    });
+                                  });
+
                                   List<String> sortedKeys = groupedItems.keys
                                       .toList();
                                   sortedKeys.sort((a, b) {
                                     if (a == activePeriodName) return -1;
                                     if (b == activePeriodName) return 1;
-                                    return b.compareTo(
-                                      a,
-                                    ); // Các chặng khác sắp xếp giảm dần
+                                    return b.compareTo(a);
                                   });
 
-                                  // 3. Render giao diện có khả năng Expand/Collapse
                                   return ListView.builder(
                                     padding: const EdgeInsets.symmetric(
                                       vertical: 8,
@@ -951,8 +1140,7 @@ class _ReportScreenState extends State<ReportScreen> {
                                           dividerColor: Colors.transparent,
                                         ),
                                         child: ExpansionTile(
-                                          initiallyExpanded:
-                                              isActivePeriod, // Tự động mở sổ chặng đang Active
+                                          initiallyExpanded: isActivePeriod,
                                           title: Text(
                                             currentPeriod,
                                             style: TextStyle(
@@ -1006,7 +1194,7 @@ class _ReportScreenState extends State<ReportScreen> {
                                                   ),
                                                 ),
                                                 subtitle: Text(
-                                                  '${item['platform']} • ${_formatDate(item['created_at'])}',
+                                                  '${item['platform']} • Hoàn thành: ${_formatDate(item['completion_date'] ?? item['created_at'])}',
                                                   style: const TextStyle(
                                                     fontSize: 12,
                                                   ),
@@ -1057,58 +1245,253 @@ class _ReportScreenState extends State<ReportScreen> {
                                   style: TextStyle(color: Colors.grey),
                                 ),
                               )
-                            : ListView.builder(
-                                padding: const EdgeInsets.symmetric(
-                                  vertical: 8,
-                                ),
-                                itemCount: _appHistory.length,
-                                itemBuilder: (context, index) {
-                                  final item = _appHistory[index];
-                                  return Card(
-                                    margin: const EdgeInsets.symmetric(
-                                      horizontal: 16,
-                                      vertical: 6,
+                            : Builder(
+                                builder: (context) {
+                                  // --- TAB 2: ỨNG DỤNG (Nhóm theo Tên Khóa Học) ---
+                                  Map<String, List<dynamic>> groupedApps = {};
+                                  for (var item in _appHistory) {
+                                    String courseName =
+                                        item['course_name'] ?? 'Không xác định';
+                                    groupedApps
+                                        .putIfAbsent(courseName, () => [])
+                                        .add(item);
+                                  }
+
+                                  // Sắp xếp các ứng dụng bên trong khóa học: Mới nhất lên đầu
+                                  groupedApps.forEach((key, list) {
+                                    list.sort((a, b) {
+                                      DateTime dateA =
+                                          DateTime.tryParse(
+                                            a['created_at'] ?? '',
+                                          ) ??
+                                          DateTime(2000);
+                                      DateTime dateB =
+                                          DateTime.tryParse(
+                                            b['created_at'] ?? '',
+                                          ) ??
+                                          DateTime(2000);
+                                      return dateB.compareTo(dateA);
+                                    });
+                                  });
+
+                                  List<String> sortedCourseNames = groupedApps
+                                      .keys
+                                      .toList();
+                                  // Có thể sort theo ABC tên khóa học hoặc mặc định theo thứ tự DB trả ra
+
+                                  return ListView.builder(
+                                    padding: const EdgeInsets.symmetric(
+                                      vertical: 8,
                                     ),
-                                    child: InkWell(
-                                      borderRadius: BorderRadius.circular(12),
-                                      onTap: () => _showAppDetailsDialog(item),
-                                      child: ListTile(
-                                        leading: const CircleAvatar(
-                                          backgroundColor: Colors.orange,
-                                          child: Icon(
-                                            Icons.star,
-                                            color: Colors.white,
+                                    itemCount: sortedCourseNames.length,
+                                    itemBuilder: (context, index) {
+                                      String courseName =
+                                          sortedCourseNames[index];
+                                      List<dynamic> courseApps =
+                                          groupedApps[courseName]!;
+
+                                      return Theme(
+                                        data: Theme.of(context).copyWith(
+                                          dividerColor: Colors.transparent,
+                                        ),
+                                        child: ExpansionTile(
+                                          initiallyExpanded:
+                                              true, // Mở sẵn hết để dễ nhìn
+                                          title: Text(
+                                            courseName,
+                                            style: const TextStyle(
+                                              fontWeight: FontWeight.bold,
+                                              fontSize: 15,
+                                              color: Colors.black87,
+                                            ),
                                           ),
-                                        ),
-                                        title: Text(
-                                          item['course_name'] ?? '',
-                                          style: const TextStyle(
-                                            fontWeight: FontWeight.bold,
+                                          subtitle: Text(
+                                            '${courseApps.length} bản kê khai ứng dụng',
                                           ),
-                                        ),
-                                        subtitle: Text(
-                                          _formatDate(item['created_at']),
-                                        ),
-                                        trailing: Row(
-                                          mainAxisSize: MainAxisSize.min,
-                                          children: [
-                                            Text(
-                                              '+${item['gamification_points'] ?? 0}đ',
-                                              style: const TextStyle(
-                                                fontWeight: FontWeight.bold,
-                                                color: Colors.orange,
-                                                fontSize: 16,
+                                          leading: const Icon(
+                                            Icons.menu_book,
+                                            color: Colors.blue,
+                                          ),
+                                          children: courseApps.map((item) {
+                                            // UI/UX Xử lý hiển thị Bóc tách điểm cho KNS
+                                            List<Widget> pointBadges = [];
+                                            if (item['ai_score'] != null &&
+                                                item['ai_score'] > 0) {
+                                              pointBadges.add(
+                                                _buildPointChip(
+                                                  'AI Chấm',
+                                                  item['ai_score'],
+                                                  Colors.orange,
+                                                ),
+                                              );
+                                            }
+                                            if (item['is_shared_group'] ==
+                                                true) {
+                                              pointBadges.add(
+                                                _buildPointChip(
+                                                  'Share',
+                                                  '✔',
+                                                  Colors.green,
+                                                ),
+                                              );
+                                            }
+                                            if (item['coffee_talk_name'] !=
+                                                    null &&
+                                                item['coffee_talk_name']
+                                                    .toString()
+                                                    .isNotEmpty) {
+                                              pointBadges.add(
+                                                _buildPointChip(
+                                                  'Coffee',
+                                                  '✔',
+                                                  Colors.brown,
+                                                ),
+                                              );
+                                            }
+                                            if (item['is_speaker'] == true) {
+                                              pointBadges.add(
+                                                _buildPointChip(
+                                                  'Speaker',
+                                                  '✔',
+                                                  Colors.purple,
+                                                ),
+                                              );
+                                            }
+
+                                            return Card(
+                                              margin:
+                                                  const EdgeInsets.symmetric(
+                                                    horizontal: 16,
+                                                    vertical: 6,
+                                                  ),
+                                              elevation: 1,
+                                              color: Colors.orange.shade50,
+                                              shape: RoundedRectangleBorder(
+                                                borderRadius:
+                                                    BorderRadius.circular(12),
+                                                side: BorderSide(
+                                                  color: Colors.orange.shade200,
+                                                  width: 1,
+                                                ),
                                               ),
-                                            ),
-                                            const SizedBox(width: 4),
-                                            const Icon(
-                                              Icons.chevron_right,
-                                              color: Colors.grey,
-                                            ),
-                                          ],
+                                              child: InkWell(
+                                                borderRadius:
+                                                    BorderRadius.circular(12),
+                                                onTap: () =>
+                                                    _showAppDetailsDialog(item),
+                                                child: Padding(
+                                                  padding: const EdgeInsets.all(
+                                                    12.0,
+                                                  ),
+                                                  child: Row(
+                                                    crossAxisAlignment:
+                                                        CrossAxisAlignment
+                                                            .start,
+                                                    children: [
+                                                      const CircleAvatar(
+                                                        backgroundColor:
+                                                            Colors.orange,
+                                                        radius: 18,
+                                                        child: Icon(
+                                                          Icons.star,
+                                                          color: Colors.white,
+                                                          size: 18,
+                                                        ),
+                                                      ),
+                                                      const SizedBox(width: 12),
+                                                      Expanded(
+                                                        child: Column(
+                                                          crossAxisAlignment:
+                                                              CrossAxisAlignment
+                                                                  .start,
+                                                          children: [
+                                                            Text(
+                                                              'Ngày nộp: ${_formatDate(item['created_at'])}',
+                                                              style:
+                                                                  const TextStyle(
+                                                                    fontSize:
+                                                                        12,
+                                                                    color: Colors
+                                                                        .grey,
+                                                                  ),
+                                                            ),
+                                                            const SizedBox(
+                                                              height: 6,
+                                                            ),
+                                                            // Hiển thị dải Badge điểm
+                                                            if (pointBadges
+                                                                .isNotEmpty)
+                                                              Wrap(
+                                                                spacing: 6,
+                                                                runSpacing: 6,
+                                                                children:
+                                                                    pointBadges,
+                                                              )
+                                                            else
+                                                              const Text(
+                                                                'Đang xử lý...',
+                                                                style: TextStyle(
+                                                                  fontSize: 12,
+                                                                  fontStyle:
+                                                                      FontStyle
+                                                                          .italic,
+                                                                ),
+                                                              ),
+                                                          ],
+                                                        ),
+                                                      ),
+                                                      Column(
+                                                        mainAxisAlignment:
+                                                            MainAxisAlignment
+                                                                .center,
+                                                        crossAxisAlignment:
+                                                            CrossAxisAlignment
+                                                                .end,
+                                                        children: [
+                                                          Text(
+                                                            '+${item['gamification_points'] ?? 0}đ',
+                                                            style:
+                                                                const TextStyle(
+                                                                  fontWeight:
+                                                                      FontWeight
+                                                                          .bold,
+                                                                  color: Colors
+                                                                      .orange,
+                                                                  fontSize: 18,
+                                                                ),
+                                                          ),
+                                                          IconButton(
+                                                            icon: const Icon(
+                                                              Icons
+                                                                  .delete_outline,
+                                                              color: Colors
+                                                                  .redAccent,
+                                                              size: 20,
+                                                            ),
+                                                            constraints:
+                                                                const BoxConstraints(),
+                                                            padding:
+                                                                const EdgeInsets.only(
+                                                                  top: 4,
+                                                                ),
+                                                            onPressed: () =>
+                                                                _deleteAppRecord(
+                                                                  item['id']
+                                                                      .toString(),
+                                                                  courseName,
+                                                                ),
+                                                          ),
+                                                        ],
+                                                      ),
+                                                    ],
+                                                  ),
+                                                ),
+                                              ),
+                                            );
+                                          }).toList(),
                                         ),
-                                      ),
-                                    ),
+                                      );
+                                    },
                                   );
                                 },
                               )),
@@ -1224,10 +1607,14 @@ class _ReportScreenState extends State<ReportScreen> {
                 const Divider(height: 1, thickness: 1),
                 Expanded(
                   child: _top5List.isEmpty
-                      ? const Center(
-                          child: Text(
-                            'Chưa có dữ liệu cho bộ lọc này.',
-                            style: TextStyle(color: Colors.grey),
+                      ? Center(
+                          child: Padding(
+                            padding: const EdgeInsets.all(16.0),
+                            child: Text(
+                              _emptyRankingMessage(),
+                              style: const TextStyle(color: Colors.grey),
+                              textAlign: TextAlign.center,
+                            ),
                           ),
                         )
                       : ListView.builder(
@@ -1461,6 +1848,28 @@ class _ReportScreenState extends State<ReportScreen> {
                 ),
               ),
           ],
+        ),
+      ),
+    );
+  }
+
+  // Helper vẽ Chip điểm cho KNS
+  Widget _buildPointChip(String label, dynamic value, Color color) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.1), // Đã sửa withOpacity
+        border: Border.all(
+          color: color.withValues(alpha: 0.5),
+        ), // Đã sửa withOpacity
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: Text(
+        '$label: $value',
+        style: TextStyle(
+          fontSize: 10,
+          fontWeight: FontWeight.bold,
+          color: color,
         ),
       ),
     );

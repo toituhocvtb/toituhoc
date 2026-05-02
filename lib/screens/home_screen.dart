@@ -29,6 +29,7 @@ class _HomeScreenState extends State<HomeScreen> {
   int _totalHours = 0;
   int _totalPoints = 0;
   int _totalProducts = 0;
+  int _totalAiPts = 0; // Thêm biến lưu điểm AI
 
   // Trạng thái xếp hạng cá nhân
   String? _departmentId;
@@ -75,6 +76,11 @@ class _HomeScreenState extends State<HomeScreen> {
         DateTime? sDate = DateTime.tryParse(period['start_date'] ?? '');
         DateTime? eDate = DateTime.tryParse(period['end_date'] ?? '');
 
+        // Bỏ qua (ẩn) các chặng chưa đến thời gian bắt đầu
+        if (sDate != null && now.isBefore(sDate)) {
+          continue;
+        }
+
         if (sDate != null && eDate != null) {
           period['period_name'] =
               '$baseName (${sDate.day}/${sDate.month} - ${eDate.day}/${eDate.month})';
@@ -85,8 +91,7 @@ class _HomeScreenState extends State<HomeScreen> {
         validPeriods.add(period); // Luôn nạp chặng vào danh sách
 
         // Logic chặn Dropdown: Nếu ngày kết thúc của chặng này từ hôm nay trở đi
-        // (nghĩa là chặng này đang diễn ra hoặc là chặng tương lai gần nhất),
-        // thì lập tức DỪNG vòng lặp, không hiển thị các chặng xa hơn nữa.
+        // (nghĩa là chặng này đang diễn ra), thì lập tức DỪNG vòng lặp, không hiển thị các chặng sau.
         if (eDate != null && now.isBefore(eDate.add(const Duration(days: 1)))) {
           break;
         }
@@ -147,10 +152,10 @@ class _HomeScreenState extends State<HomeScreen> {
         }
       }
 
-      // 3. Tải danh sách luật điểm từ Admin để biết CẦN VẼ thẻ nào
+      // 3. Tải danh sách luật điểm từ Admin để lấy Hệ số điểm
       final rulesRes = await Supabase.instance.client
           .from('gamification_rules')
-          .select('rule_key, rule_name');
+          .select('rule_key, rule_name, points');
 
       // 4. Tính điểm ứng dụng và đếm số lượng hoạt động KNS
       final appResponse = await Supabase.instance.client
@@ -161,6 +166,30 @@ class _HomeScreenState extends State<HomeScreen> {
           .eq('user_id', userId);
 
       int totalPts = 0, products = 0, shares = 0, coffee = 0, speakers = 0;
+      int aiPts = 0,
+          sharePts = 0,
+          coffeePts = 0,
+          speakerPts = 0; // Lưu điểm riêng từng mục
+
+      // Lấy trực tiếp điểm setup từ rulesRes để tính toán
+      int shareConfigPts =
+          (rulesRes as List).firstWhere(
+            (r) => r['rule_key'] == 'share_group',
+            orElse: () => {'points': 0},
+          )['points'] ??
+          5;
+      int coffeeConfigPts =
+          rulesRes.firstWhere(
+            (r) => r['rule_key'] == 'coffee_talk',
+            orElse: () => {'points': 0},
+          )['points'] ??
+          2;
+      int speakerConfigPts =
+          rulesRes.firstWhere(
+            (r) => r['rule_key'] == 'speaker',
+            orElse: () => {'points': 0},
+          )['points'] ??
+          50;
 
       for (var row in appResponse) {
         DateTime? createdAt = DateTime.tryParse(row['created_at'] ?? '');
@@ -168,22 +197,29 @@ class _HomeScreenState extends State<HomeScreen> {
           if (createdAt.isAfter(sDate.subtract(const Duration(days: 1))) &&
               createdAt.isBefore(eDate.add(const Duration(days: 1)))) {
             totalPts += (row['gamification_points'] as num?)?.toInt() ?? 0;
+            aiPts += (row['ai_score'] as num?)?.toInt() ?? 0;
             products++;
             if (row['is_shared_group'] == true) {
               shares++;
+              sharePts += shareConfigPts;
             }
             if (row['coffee_talk_name'] != null &&
                 row['coffee_talk_name'].toString().trim().isNotEmpty) {
               coffee++;
+              coffeePts += coffeeConfigPts;
             }
             if (row['is_speaker'] == true) {
               speakers++;
+              speakerPts += speakerConfigPts;
             }
           }
         }
       }
 
-      // 5. Build danh sách thẻ KNS động (Vòng lặp thông minh: Không có luật trong DB = Không tạo thẻ)
+      // QUAN TRỌNG: Quy đổi 1 phút = 1 điểm, cộng thẳng vào tổng điểm
+      totalPts += totalMins;
+
+      // 5. Build danh sách thẻ KNS động kèm Điểm hiển thị
       List<Map<String, dynamic>> dynamicCards = [];
       for (var rule in rulesRes) {
         final key = rule['rule_key'] as String;
@@ -195,19 +231,19 @@ class _HomeScreenState extends State<HomeScreen> {
         if (key == 'share_group') {
           dynamicCards.add({
             'name': name,
-            'value': '$shares lần',
+            'value': '$shares lần\n(+$sharePts đ)',
             'color': Colors.purple,
           });
         } else if (key == 'coffee_talk') {
           dynamicCards.add({
             'name': name,
-            'value': '$coffee buổi',
+            'value': '$coffee buổi\n(+$coffeePts đ)',
             'color': Colors.brown,
           });
         } else if (key == 'speaker') {
           dynamicCards.add({
             'name': name,
-            'value': '$speakers lần',
+            'value': '$speakers lần\n(+$speakerPts đ)',
             'color': Colors.red,
           });
         }
@@ -218,6 +254,7 @@ class _HomeScreenState extends State<HomeScreen> {
           _totalHours = totalMins;
           _totalPoints = totalPts;
           _totalProducts = products;
+          _totalAiPts = aiPts;
           _knsDynamicCards = dynamicCards;
         });
       }
@@ -229,7 +266,7 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  // Hàm tính toán thứ hạng cá nhân (Phòng, Khối, Toàn hàng)
+  // Hàm tính toán thứ hạng cá nhân bằng Bảng Ảo (Tối ưu token & Sửa lỗi lọc Role)
   Future<void> _fetchUserRankings(DateTime? sDate, DateTime? eDate) async {
     try {
       final currentUserId = Supabase.instance.client.auth.currentUser?.id;
@@ -239,70 +276,76 @@ class _HomeScreenState extends State<HomeScreen> {
         return;
       }
 
-      // 1. Lấy danh sách user để phân cụm
-      final profilesRes = await Supabase.instance.client
-          .from('profiles')
-          .select('id, division, department_id, role');
+      // TẢI DỮ LIỆU TỪ BẢNG ẢO
+      List<dynamic> events = [];
+      int start = 0;
+      while (true) {
+        final res = await Supabase.instance.client
+            .from('v_leaderboard_events')
+            .select(
+              'user_id, division, department_id, role, hours, points, event_date',
+            )
+            .range(start, start + 999);
+        events.addAll(res);
+        if (res.length < 1000) break;
+        start += 1000;
+      }
+
+      String targetRole = _isKNS ? 'kns' : 'tsc'; // Role của đợt đang xét
+
+      Map<String, int> userHours = {};
+      Map<String, int> userPoints = {};
 
       List<String> sysUserIds = [];
       List<String> divUserIds = [];
       List<String> deptUserIds = [];
 
-      for (var p in profilesRes) {
-        String uid = p['id'];
-        if (!_isKNS) {
-          sysUserIds.add(uid); // KNS không xếp hạng toàn hàng
-        }
-        if (p['division'] == _division) {
-          divUserIds.add(uid);
-        }
-        if (_departmentId != null &&
-            p['department_id']?.toString() == _departmentId) {
-          deptUserIds.add(uid);
-        }
-      }
+      // Failsafe: Khởi tạo cho chính mình để xử lý điểm 0
+      userHours[currentUserId] = 0;
+      userPoints[currentUserId] = 0;
+      if (!_isKNS) sysUserIds.add(currentUserId);
+      divUserIds.add(currentUserId);
+      if (_departmentId != null) deptUserIds.add(currentUserId);
 
-      // 2. Lấy dữ liệu Giờ học
-      final hoursRes = await Supabase.instance.client
-          .from('learning_hours')
-          .select('user_id, duration_minutes, created_at, completion_date');
+      Set<String> processedUsers = {currentUserId};
 
-      Map<String, int> userHours = {};
-      for (var row in hoursRes) {
-        DateTime? recordDate = DateTime.tryParse(
-          row['completion_date'] ?? row['created_at'] ?? '',
-        );
+      for (var ev in events) {
+        String uid = ev['user_id']?.toString() ?? '';
+        if (uid.isEmpty) continue;
+
+        String userRole = ev['role']?.toString() ?? '';
+
+        // CỐT LÕI: CHỈ LỌC NHỮNG NGƯỜI CÙNG ROLE VỚI ĐỢT ĐANG CHỌN ĐỂ XẾP HẠNG
+        if (userRole != targetRole) continue;
+
+        if (!processedUsers.contains(uid)) {
+          processedUsers.add(uid);
+          if (targetRole == 'tsc') sysUserIds.add(uid);
+          if (ev['division'] == _division) divUserIds.add(uid);
+          if (ev['department_id']?.toString() == _departmentId) {
+            deptUserIds.add(uid);
+          }
+        }
+
+        DateTime? recordDate = DateTime.tryParse(ev['event_date'] ?? '');
+        int hrs = (ev['hours'] as num?)?.toInt() ?? 0;
+        int pts = (ev['points'] as num?)?.toInt() ?? 0;
+
         if (recordDate != null && sDate != null && eDate != null) {
           if (recordDate.isAfter(sDate.subtract(const Duration(days: 1))) &&
               recordDate.isBefore(eDate.add(const Duration(days: 1)))) {
-            String uid = row['user_id'];
-            userHours[uid] =
-                (userHours[uid] ?? 0) +
-                (row['duration_minutes'] as num).toInt();
+            userHours[uid] = (userHours[uid] ?? 0) + hrs;
+            userPoints[uid] = (userPoints[uid] ?? 0) + pts;
           }
         }
       }
 
-      // 3. Lấy dữ liệu Điểm ứng dụng
-      final appsRes = await Supabase.instance.client
-          .from('practical_applications')
-          .select('user_id, gamification_points, created_at');
+      // Quy đổi 1 phút học = 1 điểm cộng dồn vào bảng điểm
+      userPoints.forEach((uid, pts) {
+        userPoints[uid] = pts + (userHours[uid] ?? 0);
+      });
 
-      Map<String, int> userPoints = {};
-      for (var row in appsRes) {
-        DateTime? recordDate = DateTime.tryParse(row['created_at'] ?? '');
-        if (recordDate != null && sDate != null && eDate != null) {
-          if (recordDate.isAfter(sDate.subtract(const Duration(days: 1))) &&
-              recordDate.isBefore(eDate.add(const Duration(days: 1)))) {
-            String uid = row['user_id'];
-            userPoints[uid] =
-                (userPoints[uid] ?? 0) +
-                ((row['gamification_points'] as num?)?.toInt() ?? 0);
-          }
-        }
-      }
-
-      // Hàm Helper để xếp hạng
+      // Hàm Helper để xếp hạng (LOẠI NGƯỜI 0 ĐIỂM)
       int getRank(
         List<String> groupIds,
         Map<String, int> dataMap,
@@ -313,8 +356,11 @@ class _HomeScreenState extends State<HomeScreen> {
             .map((uid) => {'id': uid, 'score': dataMap[uid] ?? 0})
             .toList();
         list.sort((a, b) => (b['score'] as int).compareTo(a['score'] as int));
-        int rank = list.indexWhere((e) => e['id'] == myId) + 1;
-        return rank;
+
+        // TRỌNG TÂM: Nếu mình có 0 điểm thì trả về 0 để UI hiện '--' thay vì hạng ảo
+        if ((dataMap[myId] ?? 0) == 0) return 0;
+
+        return list.indexWhere((e) => e['id'] == myId) + 1;
       }
 
       if (mounted) {
@@ -647,59 +693,63 @@ class _HomeScreenState extends State<HomeScreen> {
               ],
             ),
             const SizedBox(height: 12),
-            // UX/UI Mới: Thẻ thống kê cuộn ngang siêu gọn
-            SizedBox(
-              height: 80,
-              child: ListView(
-                scrollDirection: Axis.horizontal,
-                children: [
-                  GestureDetector(
-                    onTap: () => Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (context) =>
-                            const HistoryScreen(initialIndex: 0),
-                      ),
-                    ),
-                    child: _buildStatCard(
-                      'Tổng giờ học',
-                      '$_totalHours phút',
-                      Colors.blue,
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  GestureDetector(
-                    onTap: () => Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (context) =>
-                            const HistoryScreen(initialIndex: 1),
-                      ),
-                    ),
-                    child: _buildStatCard(
-                      'SP Ứng dụng',
-                      '$_totalProducts SP',
-                      Colors.red,
-                    ),
-                  ),
-                  if (_isKNS)
-                    ..._knsDynamicCards.map(
-                      (card) => Padding(
-                        padding: const EdgeInsets.only(left: 12.0),
-                        child: _buildStatCard(
-                          card['name'],
-                          card['value'],
-                          card['color'],
+            // UX/UI Mới: Thẻ thống kê cuộn ngang linh hoạt chiều cao
+            SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              clipBehavior: Clip.none, // Giữ bóng đổ (box-shadow) không bị cắt
+              child: IntrinsicHeight(
+                child: Row(
+                  crossAxisAlignment:
+                      CrossAxisAlignment.stretch, // Ép các thẻ cao bằng nhau
+                  children: [
+                    GestureDetector(
+                      onTap: () => Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (context) =>
+                              const HistoryScreen(initialIndex: 0),
                         ),
                       ),
+                      child: _buildStatCard(
+                        'Tổng giờ học',
+                        '$_totalHours phút\n(+$_totalHours đ)',
+                        Colors.blue,
+                      ),
                     ),
-                  const SizedBox(width: 12),
-                  _buildStatCard(
-                    'Tổng điểm',
-                    '$_totalPoints điểm',
-                    Colors.blue,
-                  ),
-                ],
+                    const SizedBox(width: 12),
+                    GestureDetector(
+                      onTap: () => Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (context) =>
+                              const HistoryScreen(initialIndex: 1),
+                        ),
+                      ),
+                      child: _buildStatCard(
+                        'SP Ứng dụng',
+                        '$_totalProducts SP\n(+$_totalAiPts đ)',
+                        Colors.red,
+                      ),
+                    ),
+                    if (_isKNS)
+                      ..._knsDynamicCards.map(
+                        (card) => Padding(
+                          padding: const EdgeInsets.only(left: 12.0),
+                          child: _buildStatCard(
+                            card['name'],
+                            card['value'],
+                            card['color'],
+                          ),
+                        ),
+                      ),
+                    const SizedBox(width: 12),
+                    _buildStatCard(
+                      'Tổng điểm',
+                      '$_totalPoints điểm',
+                      Colors.blue,
+                    ),
+                  ],
+                ),
               ),
             ),
             const SizedBox(height: 24),
