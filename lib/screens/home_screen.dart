@@ -1,5 +1,8 @@
+import 'dart:async'; // Bắt buộc để sử dụng Timer
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:mailer/mailer.dart';
+import 'package:mailer/smtp_server.dart';
 import 'quick_log_widget.dart';
 import 'history_screen.dart';
 import 'admin_setup_screen.dart';
@@ -38,6 +41,240 @@ class _HomeScreenState extends State<HomeScreen> {
 
   // Render động hoàn toàn các thẻ KNS (Không fix cứng biến)
   List<Map<String, dynamic>> _knsDynamicCards = [];
+
+  // Hàm hiển thị Popup nhập Báo lỗi và Gửi Mail ngầm
+  void _showReportIssueDialog() {
+    final TextEditingController contentController = TextEditingController();
+    bool isSending = false;
+    int countdown = 10;
+    Timer? sendTimer;
+
+    showDialog(
+      context: context,
+      barrierDismissible: false, // Chặn bấm ra ngoài để tắt
+      builder: (ctx) {
+        return PopScope(
+          canPop: !isSending, // Khóa nút Back của điện thoại khi đang gửi
+          child: StatefulBuilder(
+            builder: (contextDialog, setStateDialog) {
+              return AlertDialog(
+                title: const Row(
+                  children: [
+                    Icon(Icons.bug_report, color: Colors.orange),
+                    SizedBox(width: 8),
+                    Text(
+                      'Báo lỗi / Góp ý',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ],
+                ),
+                content: SizedBox(
+                  width: MediaQuery.of(context).size.width * 0.8,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Nội dung sẽ được gửi trực tiếp đến hệ thống để xử lý.',
+                        style: TextStyle(fontSize: 13, color: Colors.grey),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: contentController,
+                        maxLines: 5,
+                        enabled: !isSending,
+                        decoration: const InputDecoration(
+                          hintText:
+                              'Mô tả chi tiết lỗi bạn gặp phải hoặc góp ý...',
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      const Divider(),
+                      const SizedBox(height: 8),
+                      // Dòng text chuyên nghiệp theo yêu cầu
+                      const Text(
+                        'Sản phẩm được phát triển bởi Trường ĐT&PTNNL.\nMọi vướng mắc, vui lòng liên hệ trực tiếp qua email: hapt12@vietinbank.vn',
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontStyle: FontStyle.italic,
+                          color: Colors.blueGrey,
+                          height: 1.4,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: isSending ? null : () => Navigator.pop(ctx),
+                    child: const Text(
+                      'Hủy',
+                      style: TextStyle(color: Colors.grey),
+                    ),
+                  ),
+                  ElevatedButton(
+                    onPressed: isSending
+                        ? null
+                        : () async {
+                            final content = contentController.text.trim();
+                            if (content.isEmpty) {
+                              ScaffoldMessenger.of(ctx).showSnackBar(
+                                const SnackBar(
+                                  content: Text('Vui lòng nhập nội dung!'),
+                                ),
+                              );
+                              return;
+                            }
+
+                            setStateDialog(() {
+                              isSending = true;
+                              countdown = 10;
+                            });
+
+                            sendTimer = Timer.periodic(
+                              const Duration(seconds: 1),
+                              (timer) {
+                                if (mounted) {
+                                  setStateDialog(() {
+                                    if (countdown > 0) countdown--;
+                                  });
+                                }
+                              },
+                            );
+
+                            // BẢO VỆ ASYNC GAP: Lưu context trước khi chạy lệnh await
+                            final navigator = Navigator.of(ctx);
+                            final messenger = ScaffoldMessenger.of(context);
+
+                            try {
+                              // Truy vấn Database để lấy toàn bộ email của các Admin
+                              final adminRes = await Supabase.instance.client
+                                  .from('profiles')
+                                  .select('email')
+                                  .eq('is_admin', true);
+
+                              List<String> adminEmails = [];
+                              for (var row in adminRes) {
+                                if (row['email'] != null &&
+                                    row['email'].toString().trim().isNotEmpty) {
+                                  adminEmails.add(row['email']);
+                                }
+                              }
+
+                              // Dự phòng: Nếu Database lỗi hoặc chưa có ai là admin thì gửi về email mặc định
+                              if (adminEmails.isEmpty) {
+                                adminEmails.add('hapt12@vietinbank.vn');
+                              }
+
+                              // Thông tin tài khoản trạm gửi đi
+                              String username = 'toituhocvtb@gmail.com';
+                              // NHẬP 16 KÝ TỰ MẬT KHẨU ỨNG DỤNG CỦA ANH VÀO ĐÂY:
+                              String appPassword = 'recsazybhaaqfqzx';
+
+                              final smtpServer = gmail(username, appPassword);
+                              final currentUserId =
+                                  Supabase
+                                      .instance
+                                      .client
+                                      .auth
+                                      .currentUser
+                                      ?.id ??
+                                  'Khách';
+
+                              final message = Message()
+                                ..from = Address(
+                                  username,
+                                  'Hệ thống Tôi Tự Học',
+                                )
+                                ..recipients.addAll(adminEmails)
+                                ..subject =
+                                    'Báo cáo sự cố / Góp ý từ $_fullName'
+                                ..text =
+                                    '''
+Xin chào,
+
+Hệ thống vừa nhận được một Báo cáo / Góp ý từ người dùng trên App:
+
+--- THÔNG TIN NGƯỜI GỬI ---
+- Họ và tên: $_fullName
+- Đơn vị: ${_department.isNotEmpty ? '$_division - $_department' : _division}
+- User ID: $currentUserId
+- Thời gian: ${DateTime.now().toLocal()}
+---------------------------
+
+--- NỘI DUNG CHI TIẾT ---
+$content
+''';
+
+                              await send(message, smtpServer);
+
+                              sendTimer?.cancel();
+                              if (!mounted) return;
+
+                              navigator.pop();
+                              messenger.showSnackBar(
+                                const SnackBar(
+                                  content: Text('Đã gửi báo cáo thành công!'),
+                                  backgroundColor: Colors.green,
+                                ),
+                              );
+                            } catch (e) {
+                              sendTimer?.cancel();
+                              setStateDialog(() => isSending = false);
+                              if (!mounted) return;
+
+                              messenger.showSnackBar(
+                                SnackBar(
+                                  content: Text('Lỗi gửi báo cáo: $e'),
+                                  backgroundColor: Colors.red,
+                                  duration: const Duration(seconds: 5),
+                                ),
+                              );
+                            }
+                          },
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.blue.shade800,
+                    ),
+                    child: isSending
+                        ? Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const SizedBox(
+                                width: 16,
+                                height: 16,
+                                child: CircularProgressIndicator(
+                                  color: Colors.white,
+                                  strokeWidth: 2,
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              Text(
+                                countdown > 0
+                                    ? 'Đang gửi... (${countdown}s)'
+                                    : 'Đang xử lý...',
+                                style: const TextStyle(color: Colors.white),
+                              ),
+                            ],
+                          )
+                        : const Text(
+                            'Gửi báo cáo',
+                            style: TextStyle(color: Colors.white),
+                          ),
+                  ),
+                ],
+              );
+            },
+          ),
+        );
+      },
+    ).then((_) {
+      sendTimer?.cancel();
+    });
+  }
 
   @override
   void initState() {
@@ -546,6 +783,8 @@ class _HomeScreenState extends State<HomeScreen> {
                 ).then((_) {
                   _fetchLearningStats();
                 });
+              } else if (value == 'report_issue') {
+                _showReportIssueDialog(); // Hiển thị Form báo cáo trực tiếp
               } else if (value == 'logout') {
                 Supabase.instance.client.auth.signOut();
               }
@@ -611,6 +850,22 @@ class _HomeScreenState extends State<HomeScreen> {
                     ],
                   ),
                 ),
+              const PopupMenuItem<String>(
+                value: 'report_issue',
+                child: Row(
+                  children: [
+                    Icon(Icons.bug_report, color: Colors.orange, size: 20),
+                    SizedBox(width: 12),
+                    Text(
+                      'Báo lỗi / Góp ý',
+                      style: TextStyle(
+                        color: Colors.black87,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
               const PopupMenuItem<String>(
                 value: 'logout',
                 child: Row(

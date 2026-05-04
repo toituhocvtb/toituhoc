@@ -398,36 +398,90 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
     return text.trim().split(RegExp(r'\s+')).length;
   }
 
-  // Popup thông báo điểm AI và Nhận xét
-  void _showAIScoreDialog(int score, int maxScore, String feedback) {
+  // Popup thông báo Điểm tổng hợp (AI + Điểm cộng)
+  void _showScoreDialog({
+    required bool hasMainApp,
+    required int aiScore,
+    required int aiMaxScore,
+    required String aiFeedback,
+    required int totalPoints,
+    required bool sharedGroup,
+    required bool coffeeTalk,
+    required bool speaker,
+  }) {
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Kết quả đánh giá AI 🤖'),
+        title: const Text('🎉 Chúc mừng bạn!'),
         content: SingleChildScrollView(
           child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              // 1. Nếu có kê khai Sản phẩm ứng dụng -> Hiện điểm AI
+              if (hasMainApp) ...[
+                const Text(
+                  '🤖 Đánh giá từ AI:',
+                  style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                    color: Colors.blue,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  '• Điểm ứng dụng: $aiScore / $aiMaxScore điểm',
+                  style: const TextStyle(fontSize: 15),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  '• Nhận xét: $aiFeedback',
+                  style: const TextStyle(
+                    fontSize: 14,
+                    fontStyle: FontStyle.italic,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                const Divider(),
+                const SizedBox(height: 8),
+              ],
+
+              // 2. Bảng kê chi tiết các điểm cộng phụ (Nếu có)
+              if (_isKNS && (sharedGroup || coffeeTalk || speaker)) ...[
+                const Text(
+                  '⭐ Điểm cộng thêm các hoạt động:',
+                  style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                    color: Colors.orange,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                if (sharedGroup)
+                  Text(
+                    '• Chia sẻ Group: +$_shareGroupPts điểm',
+                    style: const TextStyle(fontSize: 15),
+                  ),
+                if (coffeeTalk)
+                  Text(
+                    '• Dự Coffee Talk: +$_coffeeTalkPts điểm',
+                    style: const TextStyle(fontSize: 15),
+                  ),
+                if (speaker)
+                  Text(
+                    '• Diễn giả: +$_speakerPts điểm',
+                    style: const TextStyle(fontSize: 15),
+                  ),
+                const SizedBox(height: 12),
+                const Divider(),
+                const SizedBox(height: 8),
+              ],
+
+              // 3. Tổng điểm cuối cùng
               Text(
-                'Điểm số: $score / $maxScore',
+                '=> TỔNG ĐIỂM TÍCH LŨY: $totalPoints ĐIỂM',
                 style: const TextStyle(
                   fontSize: 18,
                   fontWeight: FontWeight.bold,
-                  color: Colors.blue,
-                ),
-              ),
-              const SizedBox(height: 12),
-              const Text(
-                'Nhận xét từ AI:',
-                style: TextStyle(fontWeight: FontWeight.bold),
-              ),
-              const SizedBox(height: 4),
-              Text(
-                feedback,
-                style: const TextStyle(
-                  fontSize: 14,
-                  fontStyle: FontStyle.italic,
+                  color: Colors.green,
                 ),
               ),
             ],
@@ -471,7 +525,12 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
     final practical = _practicalController.text.trim();
     final driveLink = _driveLinkController.text.trim();
 
-    // 1. Kiểm tra Chặng và khóa học (luôn bắt buộc)
+    // Xác định trạng thái của mục Ứng dụng chính (TSC mặc định luôn bật, KNS dựa vào công tắc)
+    bool isMainAppActive = !_isKNS || _isMainApp;
+    bool hasAnyKnsOption =
+        _isKNS && (_isMainApp || _isSharedGroup || _isCoffeeTalk || _isSpeaker);
+
+    // 1. Kiểm tra Chặng (luôn bắt buộc cho mọi trường hợp)
     if (phase.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Vui lòng chọn Chặng/Đợt ghi nhận!')),
@@ -479,17 +538,15 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
       return;
     }
 
-    if (course.isEmpty) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('Vui lòng chọn khóa học!')));
+    // 2. Kiểm tra Khóa học (Chỉ bắt buộc nếu có chọn Sản phẩm ứng dụng chính)
+    if (isMainAppActive && course.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Vui lòng chọn khóa học để kê khai Sản phẩm ứng dụng!'),
+        ),
+      );
       return;
     }
-
-    // Xác định trạng thái của mục Ứng dụng chính (TSC mặc định luôn bật, KNS dựa vào công tắc)
-    bool isMainAppActive = !_isKNS || _isMainApp;
-    bool hasAnyKnsOption =
-        _isKNS && (_isMainApp || _isSharedGroup || _isCoffeeTalk || _isSpeaker);
 
     if (_isKNS && !hasAnyKnsOption) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -661,7 +718,10 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
       final Map<String, dynamic> payload = {
         'user_id': userId,
         'phase_batch': phase,
-        'course_name': course,
+        // Sửa lỗi Database "violates not-null constraint"
+        'course_name': isMainAppActive && course.isNotEmpty
+            ? course
+            : 'Kê khai bổ sung (Không chọn khóa)',
         'key_learnings': isMainAppActive ? learnings : null,
         'practical_results': isMainAppActive ? practical : null,
         'drive_link': (isMainAppActive && driveLink.isNotEmpty)
@@ -744,12 +804,19 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
 
       // UI Thành công
       if (mounted) {
-        if (isMainAppActive) {
-          if (isTimeout) {
-            _showTimeoutDialog();
-          } else {
-            _showAIScoreDialog(aiScore, aiMaxScore, aiResult['feedback']);
-          }
+        if (isMainAppActive && isTimeout) {
+          _showTimeoutDialog();
+        } else {
+          _showScoreDialog(
+            hasMainApp: isMainAppActive,
+            aiScore: aiScore,
+            aiMaxScore: aiMaxScore,
+            aiFeedback: aiResult['feedback'],
+            totalPoints: totalGamificationPoints,
+            sharedGroup: _isSharedGroup,
+            coffeeTalk: _isCoffeeTalk,
+            speaker: _isSpeaker,
+          );
         }
 
         ScaffoldMessenger.of(context).showSnackBar(
@@ -986,9 +1053,9 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // --- PHẦN 1: CHỌN CHẶNG VÀ KHÓA HỌC ---
+            // --- PHẦN 1: CHỌN CHẶNG / ĐỢT ---
             const Text(
-              '1. Chọn Chặng/Đợt và Khóa học',
+              '1. Chọn Chặng/Đợt ghi nhận',
               style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
             ),
             const SizedBox(height: 12),
@@ -1073,69 +1140,7 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
                 });
               },
             ),
-            const SizedBox(height: 16),
-            Row(
-              children: [
-                Checkbox(
-                  value: _showAllCourses,
-                  onChanged: (val) {
-                    setState(() {
-                      _showAllCourses = val ?? false;
-                      _updateCourseDropdown();
-                    });
-                  },
-                ),
-                const Expanded(
-                  child: Text(
-                    'Cho phép kê khai lại các khóa đã nộp ứng dụng',
-                    style: TextStyle(fontSize: 14),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            LayoutBuilder(
-              builder: (context, constraints) {
-                final isDesktop = constraints.maxWidth > 600;
 
-                // Dùng chung 1 giao diện nút bấm giả Dropdown cho cả Web và Mobile
-                return InkWell(
-                  onTap: isDesktop
-                      ? _showSearchableCourseDialog
-                      : _showSearchableCoursePicker,
-                  borderRadius: BorderRadius.circular(4),
-                  child: InputDecorator(
-                    decoration: const InputDecoration(
-                      labelText: 'Khóa học',
-                      border: OutlineInputBorder(),
-                    ),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Expanded(
-                          child: Text(
-                            _selectedCourse ?? 'Chọn khóa học',
-                            style: TextStyle(
-                              color: _selectedCourse == null
-                                  ? Colors.grey[600]
-                                  : Theme.of(
-                                      context,
-                                    ).textTheme.bodyLarge?.color,
-                            ),
-                            overflow: TextOverflow
-                                .ellipsis, // Cắt chữ dài tránh lỗi tràn màn hình
-                          ),
-                        ),
-                        const Icon(
-                          Icons.search,
-                          color: Colors.grey,
-                        ), // Đổi icon thành kính lúp để rõ tính năng tìm kiếm
-                      ],
-                    ),
-                  ),
-                );
-              },
-            ),
             const SizedBox(height: 24),
 
             // --- PHẦN 2: CÁC HẠNG MỤC KÊ KHAI ---
@@ -1173,6 +1178,64 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
+                    Row(
+                      children: [
+                        Checkbox(
+                          value: _showAllCourses,
+                          onChanged: (val) {
+                            setState(() {
+                              _showAllCourses = val ?? false;
+                              _updateCourseDropdown();
+                            });
+                          },
+                        ),
+                        const Expanded(
+                          child: Text(
+                            'Cho phép kê khai lại các khóa đã nộp ứng dụng',
+                            style: TextStyle(fontSize: 14),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    LayoutBuilder(
+                      builder: (context, constraints) {
+                        final isDesktop = constraints.maxWidth > 600;
+
+                        return InkWell(
+                          onTap: isDesktop
+                              ? _showSearchableCourseDialog
+                              : _showSearchableCoursePicker,
+                          borderRadius: BorderRadius.circular(4),
+                          child: InputDecorator(
+                            decoration: const InputDecoration(
+                              labelText: 'Khóa học áp dụng',
+                              border: OutlineInputBorder(),
+                            ),
+                            child: Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                Expanded(
+                                  child: Text(
+                                    _selectedCourse ?? 'Chọn khóa học',
+                                    style: TextStyle(
+                                      color: _selectedCourse == null
+                                          ? Colors.grey[600]
+                                          : Theme.of(
+                                              context,
+                                            ).textTheme.bodyLarge?.color,
+                                    ),
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                                const Icon(Icons.search, color: Colors.grey),
+                              ],
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                    const SizedBox(height: 16),
                     TextField(
                       controller: _learningsController,
                       maxLines: 3,
@@ -1428,9 +1491,11 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
                           ),
                           const SizedBox(width: 12),
                           Text(
-                            _countdownSeconds > 8
-                                ? 'Đang chấm AI ${_dotFrames[_dotIndex]}'
-                                : 'Đang chấm AI... (Còn ${_countdownSeconds}s)',
+                            (!_isKNS || _isMainApp)
+                                ? (_countdownSeconds > 8
+                                      ? 'Đang chấm AI ${_dotFrames[_dotIndex]}'
+                                      : 'Đang chấm AI... (Còn ${_countdownSeconds}s)')
+                                : 'Đang gửi dữ liệu ${_dotFrames[_dotIndex]}',
                             style: const TextStyle(
                               fontSize: 16,
                               fontWeight: FontWeight.bold,
