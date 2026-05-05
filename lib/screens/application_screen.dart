@@ -21,6 +21,7 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
   // Trạng thái hệ thống
   bool _isLoadingRole = true;
   bool _isKNS = false;
+  bool _isAllRole = false;
   bool _isSubmitting = false;
 
   // Logic đồng hồ AI tâm lý học
@@ -184,7 +185,11 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
       const apiKey = String.fromEnvironment('GROQ_API_KEY');
 
       if (apiKey.isEmpty) {
-        return {'score': 0, 'feedback': 'Lỗi thiếu cấu hình API Key.'};
+        return {
+          'score': 0,
+          'feedback': 'Lỗi thiếu cấu hình API Key.',
+          'status': 'ERROR',
+        };
       }
 
       final prompt =
@@ -242,6 +247,7 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
         return {
           'score': (maxScore / 2).round(),
           'feedback': 'Hệ thống AI đang bận. Điểm tạm tính.',
+          'status': 'ERROR',
         };
       }
 
@@ -256,13 +262,18 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
       return {
         'score': score > maxScore ? maxScore : score,
         'feedback': feedback,
+        'status': 'SUCCESS',
       };
     } on TimeoutException {
       // Bắt lỗi quá thời gian 15 giây
-      return {'score': -1, 'feedback': 'timeout'};
+      return {'score': -1, 'feedback': 'timeout', 'status': 'TIMEOUT'};
     } catch (e) {
       debugPrint('Lỗi AI: $e');
-      return {'score': 0, 'feedback': 'Gặp sự cố khi kết nối AI.'};
+      return {
+        'score': (maxScore / 2).round(),
+        'feedback': 'Gặp sự cố khi kết nối AI.',
+        'status': 'ERROR',
+      };
     }
   }
 
@@ -329,7 +340,8 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
 
       if (mounted) {
         setState(() {
-          _isKNS = (data['role'] == 'kns');
+          _isKNS = (data['role'] == 'kns' || data['role'] == 'all');
+          _isAllRole = (data['role'] == 'all');
         });
       }
 
@@ -344,12 +356,16 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
   // NGHIỆP VỤ 1.1: Tải danh sách Chặng/Đợt theo Role
   Future<void> _fetchPhases() async {
     try {
-      final roleStr = _isKNS ? 'kns' : 'tsc';
-      final res = await Supabase.instance.client
+      var query = Supabase.instance.client
           .from('learning_periods')
-          .select('period_name, start_date, end_date, is_active')
-          .eq('target_role', roleStr)
-          .order('start_date', ascending: true);
+          .select('period_name, start_date, end_date, claim_cutoff_date');
+
+      if (_isAllRole) {
+        query = query.inFilter('target_role', ['tsc', 'kns']);
+      } else {
+        query = query.eq('target_role', _isKNS ? 'kns' : 'tsc');
+      }
+      final res = await query.order('start_date', ascending: true);
 
       List<Map<String, dynamic>> phases = [];
       String? activePhase;
@@ -359,16 +375,24 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
         String pName = row['period_name'] as String;
         DateTime? sDate = DateTime.tryParse(row['start_date'] ?? '');
         DateTime? eDate = DateTime.tryParse(row['end_date'] ?? '');
+        DateTime? cutoffDate = DateTime.tryParse(
+          row['claim_cutoff_date'] ?? '',
+        );
+        cutoffDate ??= eDate;
 
-        // Bỏ qua (ẩn) các chặng chưa đến thời gian bắt đầu để tránh kê khai sai
+        // Bỏ qua (ẩn) các chặng chưa đến thời gian bắt đầu hoặc đã qua hạn chót (Cut-off)
         if (sDate != null && now.isBefore(sDate)) {
+          continue;
+        }
+        if (cutoffDate != null &&
+            now.isAfter(cutoffDate.add(const Duration(days: 1)))) {
           continue;
         }
 
         phases.add(row);
 
-        // Ưu tiên set Active nếu DB mở cờ is_active VÀ ngày hiện tại nằm trong chặng
-        if (row['is_active'] == true && sDate != null && eDate != null) {
+        // Tự động set Active nếu ngày hiện tại nằm trong chặng (bỏ qua cờ is_active)
+        if (sDate != null && eDate != null) {
           if (now.isAfter(sDate.subtract(const Duration(days: 1))) &&
               now.isBefore(eDate.add(const Duration(days: 1)))) {
             activePhase = pName;
@@ -569,14 +593,6 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
         );
         return;
       }
-      if (_countWords(learnings) < 50) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Nội dung tâm đắc PHẢI CÓ tối thiểu 50 từ!'),
-          ),
-        );
-        return;
-      }
       if (_countWords(practical) < 50) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
@@ -589,18 +605,6 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
 
     // Validate Minh chứng
     if (_isKNS) {
-      if (isMainAppActive &&
-          _appEvidenceAttachments.isEmpty &&
-          driveLink.isEmpty) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text(
-              'Vui lòng đính kèm file hoặc link minh chứng cho phần Sản phẩm ứng dụng!',
-            ),
-          ),
-        );
-        return;
-      }
       if (_isSharedGroup && _groupShareAttachments.isEmpty) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
@@ -753,24 +757,44 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
       Map<String, dynamic> aiResult = {
         'score': 0,
         'feedback': 'Chỉ kê khai tiêu chí bổ sung, không có bài học chính.',
+        'status': 'PENDING',
       };
-      bool isTimeout = false;
 
       if (isMainAppActive) {
-        aiResult = await _evaluateWithAI(
-          course,
-          learnings,
-          practical,
-          aiMaxScore,
-        );
-        isTimeout = aiResult['score'] == -1;
+        // CẬP NHẬT LOGIC ĐIỂM KÍN (STEALTH SCORING)
+        bool hasEvidence =
+            _appEvidenceAttachments.isNotEmpty || driveLink.isNotEmpty;
+
+        if (hasEvidence) {
+          int stealthScore = 20;
+          if (stealthScore > aiMaxScore) stealthScore = aiMaxScore;
+
+          aiResult = {
+            'score': stealthScore,
+            'feedback':
+                'Bài viết rất chất lượng, có kèm theo minh chứng thực tiễn rõ ràng. Bạn đã áp dụng xuất sắc kiến thức vào công việc!',
+            'status': 'STEALTH_SUCCESS',
+          };
+        } else {
+          aiResult = await _evaluateWithAI(
+            course,
+            learnings,
+            practical,
+            aiMaxScore,
+          );
+        }
       }
 
+      bool isTimeout = aiResult['status'] == 'TIMEOUT';
       int aiScore = isTimeout ? 0 : aiResult['score'];
+
       payload['ai_score'] = isTimeout ? null : aiScore;
       payload['ai_feedback'] = isTimeout
           ? 'Đang chờ hệ thống chấm điểm ngầm...'
           : aiResult['feedback'];
+
+      // Bắn trạng thái xuống DB để làm cơ sở hậu kiểm
+      payload['ai_grade_status'] = aiResult['status'];
 
       int totalGamificationPoints = aiScore;
       if (_isKNS) {
@@ -1240,7 +1264,7 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
                       controller: _learningsController,
                       maxLines: 3,
                       decoration: const InputDecoration(
-                        labelText: 'Kiến thức tâm đắc (Tối thiểu 50 từ)',
+                        labelText: 'Kiến thức tâm đắc',
                         border: OutlineInputBorder(),
                       ),
                     ),
@@ -1249,15 +1273,11 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
                       child: Padding(
                         padding: const EdgeInsets.only(top: 4, right: 4),
                         child: Text(
-                          _learningsWordCount < 50
-                              ? 'Đã viết $_learningsWordCount từ (Cần thêm ${50 - _learningsWordCount} từ)'
-                              : 'Đã viết $_learningsWordCount từ (Đạt yêu cầu)',
-                          style: TextStyle(
+                          'Đã viết $_learningsWordCount từ',
+                          style: const TextStyle(
                             fontSize: 12,
-                            fontWeight: FontWeight.bold,
-                            color: _learningsWordCount < 50
-                                ? Colors.red
-                                : Colors.green.shade700,
+                            fontStyle: FontStyle.italic,
+                            color: Colors.grey,
                           ),
                         ),
                       ),
@@ -1267,7 +1287,8 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
                       controller: _practicalController,
                       maxLines: 4,
                       decoration: const InputDecoration(
-                        labelText: 'Thực tế áp dụng (Tối thiểu 50 từ)',
+                        labelText:
+                            'Thực tế áp dụng (tối thiểu 50 từ - Gợi ý: Mô tả mục tiêu áp dụng, Hành vi đã thực hiện, Hiệu quả thực tế đạt được)',
                         border: OutlineInputBorder(),
                       ),
                     ),
@@ -1291,7 +1312,7 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
                     ),
                     const SizedBox(height: 8),
                     const Text(
-                      'Đối với file Video hoặc file dung lượng lớn, vui lòng upload lên Google Drive cá nhân và dán link chia sẻ vào ô bên dưới.',
+                      'Bạn có thể tải lên file hoặc dán link Google Drive minh chứng (KHÔNG BẮT BUỘC). Đối với video/file lớn, vui lòng dùng link Drive.',
                       style: TextStyle(
                         fontSize: 13,
                         fontStyle: FontStyle.italic,
@@ -1302,14 +1323,15 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
                     TextField(
                       controller: _driveLinkController,
                       decoration: const InputDecoration(
-                        labelText: 'Link Google Drive minh chứng (nếu có)',
+                        labelText:
+                            'Link Google Drive minh chứng (Không bắt buộc)',
                         border: OutlineInputBorder(),
                         prefixIcon: Icon(Icons.link),
                       ),
                     ),
                     const SizedBox(height: 12),
                     _buildMultiUploadSection(
-                      title: 'Tải lên minh chứng ứng dụng',
+                      title: 'Tải lên minh chứng (Không bắt buộc)',
                       maxImages: _isKNS ? _maxAppKnsImages : _maxAppTscImages,
                       attachmentsList: _appEvidenceAttachments,
                       allowedExtensions: [
@@ -1323,16 +1345,6 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
                         'xlsx',
                       ],
                     ),
-                    if (_isKNS &&
-                        _appEvidenceAttachments.isEmpty &&
-                        _driveLinkController.text.isEmpty)
-                      const Padding(
-                        padding: EdgeInsets.only(top: 4.0),
-                        child: Text(
-                          '* Bắt buộc phải có minh chứng (File hoặc Link Drive)',
-                          style: TextStyle(color: Colors.red, fontSize: 12),
-                        ),
-                      ),
                   ],
                 ),
               ),

@@ -1,4 +1,5 @@
-import 'dart:io';
+import 'dart:typed_data';
+
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -33,6 +34,8 @@ class _ReportScreenState extends State<ReportScreen> {
   String _selectedScope = 'Toàn hệ thống';
 
   int _metricIndex = 0; // 0 = Giờ học, 1 = Điểm ứng dụng
+  int _knsMaxAi = 20;
+  int _tscMaxAi = 10;
 
   // --- STATE CHO TAB LỊCH SỬ CÁ NHÂN ---
   int _historyMetricIndex = 0; // 0 = Giờ học, 1 = Ứng dụng
@@ -90,16 +93,33 @@ class _ReportScreenState extends State<ReportScreen> {
         }
       }
 
+      // Tải cấu hình điểm chuẩn hóa linh hoạt từ Admin
+      final rulesRes = await Supabase.instance.client
+          .from('gamification_rules')
+          .select('rule_key, points');
+      for (var r in rulesRes) {
+        if (r['rule_key'] == 'kns_max_ai') _knsMaxAi = r['points'];
+        if (r['rule_key'] == 'tsc_max_ai') _tscMaxAi = r['points'];
+      }
+
       // 2. Tải danh sách Đợt/Chặng (Lọc theo Role nếu không phải Admin)
       var query = Supabase.instance.client
           .from('learning_periods')
-          .select('period_name, start_date, end_date, target_role, is_active');
+          .select(
+            'period_name, start_date, end_date, claim_cutoff_date, target_role',
+          );
 
       // Nếu không phải Admin, chỉ cho xem chặng thi đua của khối mình
       if (!_isAdmin) {
-        query = query.eq('target_role', _userRole);
+        if (_userRole == 'all') {
+          query = query.inFilter('target_role', [
+            'tsc',
+            'kns',
+          ]); // Phòng B thấy cả 2 đợt
+        } else {
+          query = query.eq('target_role', _userRole);
+        }
       }
-
       final periodsRes = await query.order('start_date', ascending: true);
       _periodsConfig =
           periodsRes; // Lưu lại để dùng cho việc phân nhóm danh sách
@@ -117,8 +137,8 @@ class _ReportScreenState extends State<ReportScreen> {
           continue;
         }
 
-        // Chỉ gắn nhãn (Đang Active) và làm mặc định nếu Admin mở VÀ ngày hiện tại thực sự nằm trong chặng
-        if (p['is_active'] == true && sDate != null && eDate != null) {
+        // Tự động gắn nhãn (Đang Active) nếu ngày hiện tại nằm trong thời gian diễn ra chặng
+        if (sDate != null && eDate != null) {
           if (now.isAfter(sDate.subtract(const Duration(days: 1))) &&
               now.isBefore(eDate.add(const Duration(days: 1)))) {
             pName = '$pName (Đang Active)';
@@ -410,6 +430,8 @@ class _ReportScreenState extends State<ReportScreen> {
       }
 
       int pts = (ev['points'] as num?)?.toInt() ?? 0;
+      int aiPts = (ev['ai_points'] as num?)?.toInt() ?? 0;
+      int extraPts = (ev['extra_points'] as num?)?.toInt() ?? 0;
       int hrs = (ev['hours'] as num?)?.toInt() ?? 0;
       DateTime? date = DateTime.tryParse(ev['event_date'] ?? '');
 
@@ -427,7 +449,13 @@ class _ReportScreenState extends State<ReportScreen> {
           (userStats[uid]!['raw_app_dates'] as List).add({
             'date': date,
             'val': pts,
+            'ai_val': aiPts,
+            'extra_val': extraPts,
+            'event_name': ev['event_name'] ?? 'Không rõ',
             'evidence_url': ev['evidence_url'],
+            'share': ev['is_shared_group'] == true ? 'Có' : '',
+            'speaker': ev['is_speaker'] == true ? 'Có' : '',
+            'coffee': ev['coffee_talk_name']?.toString() ?? '',
           });
         }
       }
@@ -438,6 +466,7 @@ class _ReportScreenState extends State<ReportScreen> {
           (userStats[uid]!['raw_hour_dates'] as List).add({
             'date': date,
             'val': hrs,
+            'event_name': ev['event_name'] ?? 'Không rõ',
             'phase_batch': ev['phase_batch'],
           });
         }
@@ -456,13 +485,35 @@ class _ReportScreenState extends State<ReportScreen> {
 
     // 1. Gán giá trị So sánh dựa trên Period đang chọn
     for (var u in usersOnly) {
+      bool isSystemScope = _selectedScope == 'Toàn hệ thống';
+
       if (_selectedPeriod == 'Toàn chặng (Tích lũy)') {
-        // 1 phút học = 1 điểm. Cộng tổng giờ vào tổng điểm
-        u['sort_points'] =
-            (u['total_points'] as int) + (u['total_hours'] as int);
-        u['sort_hours'] = u['total_hours'];
+        int totalPts = 0;
+        int totalHrs = 0;
+
+        if (u['raw_app_dates'] != null) {
+          for (var item in (u['raw_app_dates'] as List)) {
+            if (isSystemScope && u['role'] == 'all') {
+              // Chuẩn hóa điểm cho Phòng B khi vào BXH toàn hàng (Bỏ qua điểm cộng)
+              double scaled =
+                  (item['ai_val'] as int) *
+                  (_tscMaxAi / (_knsMaxAi > 0 ? _knsMaxAi : 1));
+              totalPts += scaled.round();
+            } else {
+              totalPts += item['val'] as int; // Bao gồm cả ai_val + extra_val
+            }
+          }
+        }
+
+        if (u['raw_hour_dates'] != null) {
+          for (var item in (u['raw_hour_dates'] as List)) {
+            totalHrs += item['val'] as int;
+          }
+        }
+
+        u['sort_points'] = totalPts;
+        u['sort_hours'] = totalHrs;
       } else {
-        // Cắt triệt để mọi hậu tố thừa: "(Đang Active)" hoặc ngày tháng "(1/5 - 30/6)"
         String searchPeriodName = _selectedPeriod;
         if (searchPeriodName.contains(' (')) {
           searchPeriodName = searchPeriodName
@@ -473,7 +524,6 @@ class _ReportScreenState extends State<ReportScreen> {
         int periodPts = 0;
         int periodHrs = 0;
 
-        // Trim để tránh lỗi khoảng trắng ẩn trong Database
         final specificConfig = allPeriodsConfig
             .where(
               (p) =>
@@ -489,28 +539,32 @@ class _ReportScreenState extends State<ReportScreen> {
           e = DateTime.tryParse(specificConfig.first['end_date'] ?? '');
         }
 
-        // Tính điểm ứng dụng (Vẫn dùng Ngày tháng)
         if (s != null && e != null && u['raw_app_dates'] != null) {
           for (var item in (u['raw_app_dates'] as List)) {
             if (item['date'] != null &&
                 item['date'].isAfter(s.subtract(const Duration(days: 1))) &&
                 item['date'].isBefore(e.add(const Duration(days: 1)))) {
-              periodPts += item['val'] as int;
+              if (isSystemScope && u['role'] == 'all') {
+                // Chuẩn hóa điểm cho Phòng B khi vào BXH toàn hàng (Bỏ qua điểm cộng)
+                double scaled =
+                    (item['ai_val'] as int) *
+                    (_tscMaxAi / (_knsMaxAi > 0 ? _knsMaxAi : 1));
+                periodPts += scaled.round();
+              } else {
+                periodPts += item['val'] as int;
+              }
             }
           }
         }
 
-        // Tính giờ học: ưu tiên khớp phase_batch, nhưng luôn dự phòng bằng ngày hoàn thành
         if (u['raw_hour_dates'] != null) {
           for (var item in (u['raw_hour_dates'] as List)) {
             String itemPhaseRaw = item['phase_batch']?.toString().trim() ?? '';
-
             String cleanItemPhase = itemPhaseRaw.contains(' (')
                 ? itemPhaseRaw.substring(0, itemPhaseRaw.indexOf(' (')).trim()
                 : itemPhaseRaw;
 
             final bool phaseMatched = cleanItemPhase == searchPeriodName;
-
             final bool dateMatched =
                 s != null &&
                 e != null &&
@@ -524,8 +578,7 @@ class _ReportScreenState extends State<ReportScreen> {
           }
         }
 
-        // 1 phút học = 1 điểm. Cộng dồn vào điểm ứng dụng!
-        u['sort_points'] = periodPts + periodHrs;
+        u['sort_points'] = periodPts;
         u['sort_hours'] = periodHrs;
       }
     }
@@ -551,8 +604,9 @@ class _ReportScreenState extends State<ReportScreen> {
 
         if (specificConfig.isNotEmpty) {
           String targetRole = specificConfig.first['target_role'] ?? '';
-          if (u['role'] != targetRole) {
-            return false; // Loại bỏ cán bộ khác Role khỏi BXH của đợt này
+          // Cho phép role 'all' (Phòng B) lọt qua mọi rào cản Role của đợt
+          if (u['role'] != targetRole && u['role'] != 'all') {
+            return false;
           }
         }
       }
@@ -564,7 +618,11 @@ class _ReportScreenState extends State<ReportScreen> {
       if (_selectedScope == 'Phòng của tôi') {
         return u['department_id'] == _userDeptId;
       }
-      return true; // Toàn hệ thống
+      // Toàn hệ thống: TSC và B (all) hiển thị chung, loại bỏ KNS thuần (Phòng A)
+      if (_selectedScope == 'Toàn hệ thống') {
+        if (u['role'] == 'kns') return false;
+      }
+      return true;
     }).toList();
 
     debugPrint(
@@ -688,14 +746,14 @@ class _ReportScreenState extends State<ReportScreen> {
           TextCellValue('Họ và tên'),
           TextCellValue('Phòng ban'),
           TextCellValue('Khối'),
-          TextCellValue('Chặng/Đợt'),
-          TextCellValue('Giờ học'),
-          TextCellValue('Số SP'),
+          TextCellValue('Chặng/Đợt đang lọc'),
+          TextCellValue('Loại dữ liệu'),
+          TextCellValue('Tên Khóa học / Ứng dụng'),
+          TextCellValue('Điểm / Số Phút'),
           TextCellValue('Share Group'),
-          TextCellValue('Coffee Talk'),
           TextCellValue('Diễn giả'),
-          TextCellValue('Điểm'),
-          TextCellValue('Minh Chứng'),
+          TextCellValue('Coffee Talk'),
+          TextCellValue('Link URL Minh Chứng'),
         ];
       } else {
         // Báo cáo TSC rút gọn theo yêu cầu
@@ -711,29 +769,103 @@ class _ReportScreenState extends State<ReportScreen> {
       }
       sheet1.appendRow(header);
 
+      // Lấy ngày bắt đầu/kết thúc để lọc dữ liệu rác không thuộc chặng
+      DateTime? sDate;
+      DateTime? eDate;
+      if (_selectedPeriod != 'Toàn chặng (Tích lũy)') {
+        final specificConfig =
+            (_allRawData.last['config_helper'] as List<dynamic>)
+                .where(
+                  (p) =>
+                      (p['period_name']?.toString().trim() ?? '') ==
+                      exportPhaseName,
+                )
+                .toList();
+        if (specificConfig.isNotEmpty) {
+          sDate = DateTime.tryParse(specificConfig.first['start_date'] ?? '');
+          eDate = DateTime.tryParse(specificConfig.first['end_date'] ?? '');
+        }
+      }
+
+      bool isItemInPeriod(DateTime? itemDate) {
+        if (_selectedPeriod == 'Toàn chặng (Tích lũy)') return true;
+        if (sDate != null && eDate != null && itemDate != null) {
+          return itemDate.isAfter(sDate.subtract(const Duration(days: 1))) &&
+              itemDate.isBefore(eDate.add(const Duration(days: 1)));
+        }
+        return false;
+      }
+
+      // Hàm tự động gen Full Link URL từ Storage và tạo Hyperlink cho Excel
+      CellValue getExcelHyperlink(String? rawPaths) {
+        if (rawPaths == null || rawPaths.trim().isEmpty) {
+          return TextCellValue('');
+        }
+
+        final String bucketName = 'learning-evidence';
+
+        List<String> paths = rawPaths.split(';');
+        String firstPath = paths.first.trim();
+
+        if (firstPath.isEmpty) {
+          return TextCellValue('');
+        }
+
+        // Tạo link Public URL
+        String publicUrl = Supabase.instance.client.storage
+            .from(bucketName)
+            .getPublicUrl(firstPath);
+
+        // Thiết lập Giao diện text của link hiển thị trên Excel (Hiển thị xem có bao nhiêu ảnh)
+        String linkText = paths.length > 1
+            ? 'Xem Minh Chứng (+${paths.length - 1} ảnh)'
+            : 'Xem Minh Chứng';
+
+        // Bọc trong hàm HYPERLINK() của Excel để tạo link có thể click trực tiếp
+        return FormulaCellValue('HYPERLINK("$publicUrl", "$linkText")');
+      }
+
       // 3. Đổ dữ liệu vào các dòng
       for (var row in exportList) {
         if (isHRReport) {
-          String links = "";
+          // Bóc tách Điểm Ứng dụng thành từng dòng
           if (row['raw_app_dates'] != null) {
-            links += (row['raw_app_dates'] as List)
-                .where((i) => i['evidence_url'] != null)
-                .map((i) => i['evidence_url'])
-                .join("; ");
+            for (var app in (row['raw_app_dates'] as List)) {
+              if (!isItemInPeriod(app['date'])) continue;
+              sheet1.appendRow([
+                TextCellValue(row['name'] ?? ''),
+                TextCellValue(row['department_name'] ?? ''),
+                TextCellValue(row['division'] ?? ''),
+                TextCellValue(exportPhaseName),
+                TextCellValue('Sản phẩm Ứng dụng'),
+                TextCellValue(app['event_name']?.toString() ?? ''),
+                IntCellValue(app['val'] ?? 0),
+                TextCellValue(app['share']?.toString() ?? ''),
+                TextCellValue(app['speaker']?.toString() ?? ''),
+                TextCellValue(app['coffee']?.toString() ?? ''),
+                getExcelHyperlink(app['evidence_url']?.toString()),
+              ]);
+            }
           }
-          sheet1.appendRow([
-            TextCellValue(row['name'] ?? ''),
-            TextCellValue(row['department_name'] ?? ''),
-            TextCellValue(row['division'] ?? ''),
-            TextCellValue(exportPhaseName),
-            IntCellValue(row['sort_hours'] ?? row['total_hours'] ?? 0),
-            IntCellValue(row['products'] ?? 0),
-            IntCellValue(row['shares'] ?? 0),
-            IntCellValue(row['coffee'] ?? 0),
-            IntCellValue(row['speakers'] ?? 0),
-            IntCellValue(row['sort_points'] ?? row['total_points'] ?? 0),
-            TextCellValue(links),
-          ]);
+          // Bóc tách Giờ học thành từng dòng (Admin có thể xem chi tiết)
+          if (row['raw_hour_dates'] != null) {
+            for (var hour in (row['raw_hour_dates'] as List)) {
+              if (!isItemInPeriod(hour['date'])) continue;
+              sheet1.appendRow([
+                TextCellValue(row['name'] ?? ''),
+                TextCellValue(row['department_name'] ?? ''),
+                TextCellValue(row['division'] ?? ''),
+                TextCellValue(exportPhaseName),
+                TextCellValue('Giờ học'),
+                TextCellValue(hour['event_name']?.toString() ?? ''),
+                IntCellValue(hour['val'] ?? 0),
+                TextCellValue(''),
+                TextCellValue(''),
+                TextCellValue(''),
+                TextCellValue(''),
+              ]);
+            }
+          }
         } else {
           sheet1.appendRow([
             TextCellValue(row['name'] ?? ''),
@@ -747,29 +879,28 @@ class _ReportScreenState extends State<ReportScreen> {
         }
       }
 
-      // 4. Lưu file
-      String? outputFile = await FilePicker.saveFile(
+      // 4. Luu file Excel tren Web
+      final fileBytes = excel.encode();
+
+      if (fileBytes == null || fileBytes.isEmpty) {
+        throw Exception('Không tạo được dữ liệu Excel.');
+      }
+
+      await FilePicker.saveFile(
         dialogTitle: 'Lưu báo cáo Excel',
         fileName: fileName,
         type: FileType.custom,
         allowedExtensions: ['xlsx'],
+        bytes: Uint8List.fromList(fileBytes),
       );
 
-      if (outputFile != null) {
-        final fileBytes = excel.encode();
-        if (fileBytes != null) {
-          File(outputFile)
-            ..createSync(recursive: true)
-            ..writeAsBytesSync(fileBytes);
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                content: Text('Xuất Excel thành công!'),
-                backgroundColor: Colors.green,
-              ),
-            );
-          }
-        }
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Xuất Excel thành công!'),
+            backgroundColor: Colors.green,
+          ),
+        );
       }
     } catch (e) {
       debugPrint("Lỗi xuất Excel: $e");
@@ -1079,7 +1210,18 @@ class _ReportScreenState extends State<ReportScreen> {
                                                 ),
                                               )) {
                                             String pName = p['period_name'];
-                                            if (p['is_active'] == true) {
+                                            // Gắn nhãn tự động cho lịch sử
+                                            final now = DateTime.now();
+                                            if (now.isAfter(
+                                                  sDate.subtract(
+                                                    const Duration(days: 1),
+                                                  ),
+                                                ) &&
+                                                now.isBefore(
+                                                  eDate.add(
+                                                    const Duration(days: 1),
+                                                  ),
+                                                )) {
                                               pName = '$pName (Đang Active)';
                                               activePeriodName = pName;
                                             }
@@ -1593,7 +1735,7 @@ class _ReportScreenState extends State<ReportScreen> {
                       ),
                       ButtonSegment(
                         value: 1,
-                        label: Text('🔥 Xếp hạng Điểm số'),
+                        label: Text('🔥 Xếp hạng điểm ứng dụng'),
                         icon: Icon(Icons.stars),
                       ),
                     ],

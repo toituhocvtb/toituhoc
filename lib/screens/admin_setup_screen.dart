@@ -29,6 +29,10 @@ class _AdminSetupScreenState extends State<AdminSetupScreen> {
       final res = await Supabase.instance.client
           .from('system_configs')
           .select()
+          .like(
+            'config_key',
+            'max_%',
+          ) // Ẩn các config hệ thống (SMTP, AI), chỉ load cấu hình số lượng ảnh
           .order('config_name');
       if (mounted) {
         setState(() {
@@ -80,42 +84,6 @@ class _AdminSetupScreenState extends State<AdminSetupScreen> {
       // Khởi tạo thuật toán sắp xếp thông minh
       List<dynamic> sortedList = List.from(response);
       sortedList.sort((a, b) {
-        final aActive = a['is_active'] == true;
-        final bActive = b['is_active'] == true;
-
-        // Cộng thêm 1 ngày vào end_date để cho phép nộp bài đến hết ngày cuối cùng 23:59
-        DateTime aEnd;
-        try {
-          aEnd = DateTime.parse(a['end_date']).add(const Duration(days: 1));
-        } catch (_) {
-          aEnd = now;
-        }
-        DateTime bEnd;
-        try {
-          bEnd = DateTime.parse(b['end_date']).add(const Duration(days: 1));
-        } catch (_) {
-          bEnd = now;
-        }
-
-        final aExpired = now.isAfter(aEnd);
-        final bExpired = now.isAfter(bEnd);
-
-        // Cấp độ ưu tiên (Càng nhỏ càng đứng đầu danh sách)
-        // 0: Đang Active NHƯNG đã hết hạn (Báo Đỏ - Nguy hiểm)
-        // 1: Đang Active và trong hạn (Báo Xanh dương)
-        // 2: Đã tắt (Không Active)
-        int getPriority(bool active, bool expired) {
-          if (active && expired) return 0;
-          if (active && !expired) return 1;
-          return 2;
-        }
-
-        int pA = getPriority(aActive, aExpired);
-        int pB = getPriority(bActive, bExpired);
-
-        if (pA != pB) return pA.compareTo(pB);
-
-        // Nếu cùng nhóm ưu tiên, đợt nào tạo sau/thời gian mới nhất sẽ xếp lên trên
         DateTime aStart;
         try {
           aStart = DateTime.parse(a['start_date']);
@@ -129,7 +97,7 @@ class _AdminSetupScreenState extends State<AdminSetupScreen> {
           bStart = now;
         }
 
-        return bStart.compareTo(aStart);
+        return bStart.compareTo(aStart); // Xếp chặng mới nhất lên trên
       });
 
       if (mounted) {
@@ -141,92 +109,6 @@ class _AdminSetupScreenState extends State<AdminSetupScreen> {
     } catch (e) {
       debugPrint('Lỗi tải danh sách Đợt: $e');
       if (mounted) setState(() => _isLoading = false);
-    }
-  }
-
-  // Popup cảnh báo giải thích rõ UX cho Admin trước khi thực hiện
-  void _confirmToggleActive(Map<String, dynamic> item, bool currentValue) {
-    final isTurningOn = !currentValue;
-    final roleName = item['target_role'].toString().toUpperCase();
-    final title = isTurningOn
-        ? 'Kích hoạt Chặng/Đợt thi đua'
-        : 'Tắt Chặng/Đợt thi đua';
-    final content = isTurningOn
-        ? 'Bật chặng này sẽ thiết lập nó làm MẶC ĐỊNH cho Bảng xếp hạng và Báo cáo.\n\n⚠️ ĐỒNG THỜI, hệ thống sẽ tự động TẮT các chặng khác của khối $roleName để chốt sổ điểm số. Bạn có chắc chắn muốn bật?'
-        : 'Tắt chặng này sẽ khiến BXH và Báo cáo không còn chặng nào đang diễn ra. Bạn có chắc chắn muốn tắt?';
-
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text(
-          title,
-          style: TextStyle(
-            color: isTurningOn ? Colors.green.shade700 : Colors.red.shade700,
-            fontWeight: FontWeight.bold,
-          ),
-        ),
-        content: Text(content, style: const TextStyle(height: 1.4)),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Hủy', style: TextStyle(color: Colors.grey)),
-          ),
-          ElevatedButton(
-            onPressed: () {
-              Navigator.pop(ctx);
-              _toggleActive(
-                item['id'],
-                currentValue,
-                item['target_role'],
-              ); // Gọi hàm lưu thật sau khi xác nhận
-            },
-            style: ElevatedButton.styleFrom(
-              backgroundColor: isTurningOn ? Colors.green : Colors.red,
-            ),
-            child: Text(
-              isTurningOn ? 'Đồng ý Bật' : 'Đồng ý Tắt',
-              style: const TextStyle(
-                color: Colors.white,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Future<void> _toggleActive(String id, bool currentValue, String role) async {
-    try {
-      // Tùy chọn: Nếu bật 1 đợt lên, tự động tắt các đợt khác cùng role
-      if (!currentValue) {
-        await Supabase.instance.client
-            .from('learning_periods')
-            .update({'is_active': false})
-            .eq('target_role', role);
-      }
-
-      await Supabase.instance.client
-          .from('learning_periods')
-          .update({'is_active': !currentValue})
-          .eq('id', id);
-
-      _fetchPeriods();
-
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Cập nhật trạng thái thành công!'),
-            backgroundColor: Colors.green,
-          ),
-        );
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Lỗi: $e'), backgroundColor: Colors.red),
-        );
-      }
     }
   }
 
@@ -257,6 +139,7 @@ class _AdminSetupScreenState extends State<AdminSetupScreen> {
     final nameController = TextEditingController();
     DateTime? startDate;
     DateTime? endDate;
+    DateTime? cutoffDate;
 
     showDialog(
       context: context,
@@ -331,7 +214,37 @@ class _AdminSetupScreenState extends State<AdminSetupScreen> {
                           lastDate: DateTime(2030),
                         );
                         if (picked != null) {
-                          setStateDialog(() => endDate = picked);
+                          setStateDialog(() {
+                            endDate = picked;
+                            if (cutoffDate == null ||
+                                cutoffDate!.isBefore(endDate!)) {
+                              cutoffDate = endDate;
+                            }
+                          });
+                        }
+                      },
+                    ),
+                    ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: Text(
+                        cutoffDate == null
+                            ? 'Chọn ngày chặn kê khai (Cut-off)'
+                            : 'Chặn nộp: ${cutoffDate!.day}/${cutoffDate!.month}/${cutoffDate!.year}',
+                        style: TextStyle(
+                          color: Colors.red.shade700,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      trailing: Icon(Icons.block, color: Colors.red.shade700),
+                      onTap: () async {
+                        final picked = await showDatePicker(
+                          context: context,
+                          initialDate: cutoffDate ?? endDate ?? DateTime.now(),
+                          firstDate: endDate ?? DateTime.now(),
+                          lastDate: DateTime(2030),
+                        );
+                        if (picked != null) {
+                          setStateDialog(() => cutoffDate = picked);
                         }
                       },
                     ),
@@ -370,6 +283,9 @@ class _AdminSetupScreenState extends State<AdminSetupScreen> {
                             'end_date': endDate!.toIso8601String().split(
                               'T',
                             )[0],
+                            'claim_cutoff_date': (cutoffDate ?? endDate!)
+                                .toIso8601String()
+                                .split('T')[0],
                             'is_active': false,
                           });
                       _fetchPeriods();
@@ -441,10 +357,14 @@ class _AdminSetupScreenState extends State<AdminSetupScreen> {
     final nameController = TextEditingController(text: item['period_name']);
     DateTime? startDate;
     DateTime? endDate;
+    DateTime? cutoffDate;
 
     try {
       startDate = DateTime.parse(item['start_date']);
       endDate = DateTime.parse(item['end_date']);
+      cutoffDate = item['claim_cutoff_date'] != null
+          ? DateTime.parse(item['claim_cutoff_date'])
+          : endDate;
     } catch (_) {}
 
     showDialog(
@@ -526,7 +446,37 @@ class _AdminSetupScreenState extends State<AdminSetupScreen> {
                           lastDate: DateTime(2030),
                         );
                         if (picked != null) {
-                          setStateDialog(() => endDate = picked);
+                          setStateDialog(() {
+                            endDate = picked;
+                            if (cutoffDate == null ||
+                                cutoffDate!.isBefore(endDate!)) {
+                              cutoffDate = endDate;
+                            }
+                          });
+                        }
+                      },
+                    ),
+                    ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: Text(
+                        cutoffDate == null
+                            ? 'Chọn ngày chặn kê khai (Cut-off)'
+                            : 'Chặn nộp: ${cutoffDate!.day}/${cutoffDate!.month}/${cutoffDate!.year}',
+                        style: TextStyle(
+                          color: Colors.red.shade700,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      trailing: Icon(Icons.block, color: Colors.red.shade700),
+                      onTap: () async {
+                        final picked = await showDatePicker(
+                          context: context,
+                          initialDate: cutoffDate ?? endDate ?? DateTime.now(),
+                          firstDate: endDate ?? DateTime.now(),
+                          lastDate: DateTime(2030),
+                        );
+                        if (picked != null) {
+                          setStateDialog(() => cutoffDate = picked);
                         }
                       },
                     ),
@@ -564,6 +514,9 @@ class _AdminSetupScreenState extends State<AdminSetupScreen> {
                             'end_date': endDate!.toIso8601String().split(
                               'T',
                             )[0],
+                            'claim_cutoff_date': (cutoffDate ?? endDate!)
+                                .toIso8601String()
+                                .split('T')[0],
                           })
                           .eq('id', item['id']);
                       _fetchPeriods();
@@ -692,6 +645,10 @@ class _AdminSetupScreenState extends State<AdminSetupScreen> {
     final res = await Supabase.instance.client
         .from('system_configs')
         .select()
+        .like(
+          'config_key',
+          'max_%',
+        ) // Ẩn các config hệ thống (SMTP, AI), chỉ load cấu hình số lượng ảnh
         .order('config_name');
 
     List<Map<String, dynamic>> dynamicConfigs = List<Map<String, dynamic>>.from(
@@ -1066,59 +1023,64 @@ class _AdminSetupScreenState extends State<AdminSetupScreen> {
                     itemBuilder: (context, index) {
                       final item = _periods[index];
                       final isTsc = item['target_role'] == 'tsc';
-                      final isActive = item['is_active'] == true;
 
-                      // Logic kiểm tra thẻ có bị Hết hạn hay không
-                      DateTime endDate;
-                      try {
-                        endDate = DateTime.parse(
-                          item['end_date'],
-                        ).add(const Duration(days: 1));
-                      } catch (_) {
-                        endDate = DateTime.now();
-                      }
-                      final isExpired = DateTime.now().isAfter(endDate);
-
-                      // Báo động đỏ: Đang bật (Active) nhưng Đã hết hạn (Expired)
-                      final isAlert = isActive && isExpired;
-
-                      // Xử lý chuỗi ngày tháng sang định dạng dd/mm/yy
+                      // Xác định Active động dựa vào start_date và end_date
+                      DateTime sDate = DateTime.now();
+                      DateTime eDate = DateTime.now();
+                      DateTime cutoffDate = DateTime.now();
                       String startFmt = item['start_date'];
                       String endFmt = item['end_date'];
+                      String cutoffFmt = '';
                       try {
-                        final dStart = DateTime.parse(item['start_date']);
+                        sDate = DateTime.parse(item['start_date']);
+                        eDate = DateTime.parse(item['end_date']);
+                        cutoffDate = item['claim_cutoff_date'] != null
+                            ? DateTime.parse(item['claim_cutoff_date'])
+                            : eDate;
+
                         startFmt =
-                            '${dStart.day.toString().padLeft(2, '0')}/${dStart.month.toString().padLeft(2, '0')}/${dStart.year.toString().substring(2)}';
-                        final dEnd = DateTime.parse(item['end_date']);
+                            '${sDate.day.toString().padLeft(2, '0')}/${sDate.month.toString().padLeft(2, '0')}/${sDate.year.toString().substring(2)}';
                         endFmt =
-                            '${dEnd.day.toString().padLeft(2, '0')}/${dEnd.month.toString().padLeft(2, '0')}/${dEnd.year.toString().substring(2)}';
+                            '${eDate.day.toString().padLeft(2, '0')}/${eDate.month.toString().padLeft(2, '0')}/${eDate.year.toString().substring(2)}';
+                        cutoffFmt =
+                            '${cutoffDate.day.toString().padLeft(2, '0')}/${cutoffDate.month.toString().padLeft(2, '0')}/${cutoffDate.year.toString().substring(2)}';
                       } catch (_) {}
 
+                      final now = DateTime.now();
+                      final isActive =
+                          now.isAfter(
+                            sDate.subtract(const Duration(days: 1)),
+                          ) &&
+                          now.isBefore(eDate.add(const Duration(days: 1)));
+                      final isExpired = now.isAfter(
+                        cutoffDate.add(const Duration(days: 1)),
+                      );
+
                       return Card(
-                        elevation: isAlert ? 4 : 1,
-                        shape: isAlert
+                        elevation: isActive ? 4 : 1,
+                        shape: isActive
                             ? RoundedRectangleBorder(
                                 borderRadius: BorderRadius.circular(8),
-                                side: const BorderSide(
-                                  color: Colors.red,
+                                side: BorderSide(
+                                  color: Colors.blue.shade400,
                                   width: 2,
-                                ), // Viền đỏ dày
+                                ), // Viền xanh cho chặng đang diễn ra
                               )
                             : null,
-                        color: isAlert
+                        color: isActive
                             ? Colors
-                                  .red
-                                  .shade50 // Nền đỏ nhạt
-                            : (isActive ? Colors.blue.shade50 : Colors.white),
+                                  .blue
+                                  .shade50 // Nền xanh nhạt
+                            : (isExpired ? Colors.grey.shade100 : Colors.white),
                         child: ListTile(
                           contentPadding: const EdgeInsets.symmetric(
                             horizontal: 12.0,
                             vertical: 4.0,
                           ),
                           leading: CircleAvatar(
-                            backgroundColor: isAlert
-                                ? Colors.red
-                                : (isTsc ? Colors.blue : Colors.purple),
+                            backgroundColor: isTsc
+                                ? Colors.blue
+                                : Colors.purple,
                             child: Text(
                               isTsc ? 'TSC' : 'KNS',
                               style: const TextStyle(
@@ -1134,26 +1096,42 @@ class _AdminSetupScreenState extends State<AdminSetupScreen> {
                               fontWeight: isActive
                                   ? FontWeight.bold
                                   : FontWeight.normal,
-                              color: isAlert
-                                  ? Colors.red.shade900
-                                  : (isActive
-                                        ? Colors.blue.shade900
-                                        : Colors.black87),
+                              color: isActive
+                                  ? Colors.blue.shade900
+                                  : Colors.black87,
                             ),
                           ),
                           subtitle: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               const SizedBox(height: 4),
-                              Text('Từ: $startFmt'),
-                              Text('Đến: $endFmt'),
-                              if (isAlert)
+                              Text('Từ: $startFmt - Đến: $endFmt'),
+                              Text(
+                                'Chặn nộp: $cutoffFmt',
+                                style: TextStyle(
+                                  color: Colors.red.shade700,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                              if (isActive)
                                 const Padding(
                                   padding: EdgeInsets.only(top: 4.0),
                                   child: Text(
-                                    '⚠️ Chặng đã hết hạn. Vui lòng tắt đi!',
+                                    '🔥 Đang diễn ra',
                                     style: TextStyle(
-                                      color: Colors.red,
+                                      color: Colors.blue,
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                )
+                              else if (isExpired)
+                                const Padding(
+                                  padding: EdgeInsets.only(top: 4.0),
+                                  child: Text(
+                                    '🔒 Đã chốt sổ',
+                                    style: TextStyle(
+                                      color: Colors.grey,
                                       fontSize: 12,
                                       fontWeight: FontWeight.bold,
                                     ),
@@ -1161,32 +1139,12 @@ class _AdminSetupScreenState extends State<AdminSetupScreen> {
                                 ),
                             ],
                           ),
-                          // Chồng các nút lên nhau bằng Column để thu gọn không gian
                           trailing: FittedBox(
                             fit: BoxFit.scaleDown,
                             child: Column(
                               mainAxisAlignment: MainAxisAlignment.center,
                               mainAxisSize: MainAxisSize.min,
                               children: [
-                                SizedBox(
-                                  height: 24,
-                                  child: Tooltip(
-                                    message:
-                                        'Bật/Tắt làm chặng mặc định cho BXH',
-                                    child: Switch(
-                                      value: isActive,
-                                      onChanged: (val) =>
-                                          _confirmToggleActive(item, isActive),
-                                      activeThumbColor: isAlert
-                                          ? Colors.red
-                                          : Colors.green,
-                                      activeTrackColor: isAlert
-                                          ? Colors.red.shade200
-                                          : Colors.green.shade300,
-                                    ),
-                                  ),
-                                ),
-                                const SizedBox(height: 8),
                                 Row(
                                   mainAxisSize: MainAxisSize.min,
                                   children: [

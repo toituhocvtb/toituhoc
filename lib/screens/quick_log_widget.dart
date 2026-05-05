@@ -33,9 +33,8 @@ class _QuickLogWidgetState extends State<QuickLogWidget> {
       []; // Lưu trữ thêm ngày bắt đầu/kết thúc
   List<String> _phaseList = [];
   String? _selectedPhase;
-  bool _isLatePhase = false; // Cờ kiểm tra kê khai muộn
-  bool _confirmLate = false; // Checkbox xác nhận kê khai muộn
-  DateTime _completionDate = DateTime.now(); // Ngày giờ hoàn thành (có thể sửa)
+  final DateTime _completionDate =
+      DateTime.now(); // Ngày giờ hoàn thành (có thể sửa)
   // Trạng thái lưu file minh chứng (KNS) - Hỗ trợ nhiều file
   final List<Map<String, dynamic>> _selectedAttachments = [];
   int _maxKnsImages = 1; // Mặc định 1, sẽ được cập nhật từ Admin Config
@@ -70,13 +69,9 @@ class _QuickLogWidgetState extends State<QuickLogWidget> {
     try {
       final userId = Supabase.instance.client.auth.currentUser?.id;
 
-      // 1. Lấy danh sách nền tảng
-      final platformRes = await Supabase.instance.client
-          .from('learning_platforms')
-          .select('name');
-
-      // 2. Lấy role của user để phân loại Chặng/Đợt
+      // 1. Lấy role của user để phân loại Chặng/Đợt
       String role = 'tsc';
+      bool isAllRole = false;
       if (userId != null) {
         final profileRes = await Supabase.instance.client
             .from('profiles')
@@ -85,8 +80,19 @@ class _QuickLogWidgetState extends State<QuickLogWidget> {
             .maybeSingle();
         if (profileRes != null && profileRes['role'] != null) {
           role = profileRes['role'];
+          if (role == 'all') {
+            isAllRole = true;
+            role =
+                'kns'; // Mượn quyền KNS để lấy nền tảng khóa học + validate ảnh
+          }
         }
       }
+
+      // 2. Lấy danh sách nền tảng (Lọc tự động theo Role của user)
+      final platformRes = await Supabase.instance.client
+          .from('learning_platforms')
+          .select('name')
+          .or('target_role.eq.all, target_role.eq.$role');
 
       // Tải cấu hình số lượng ảnh tối đa cho QuickLog từ bảng system_configs
       final configRes = await Supabase.instance.client
@@ -95,12 +101,17 @@ class _QuickLogWidgetState extends State<QuickLogWidget> {
           .eq('config_key', 'max_quicklog_kns_images')
           .maybeSingle();
 
-      // Tải kèm start_date và end_date để xử lý logic cảnh báo
-      final periodsRes = await Supabase.instance.client
+      // Tải kèm start_date, end_date, và claim_cutoff_date để xử lý logic ẩn/hiện chặng
+      var periodQuery = Supabase.instance.client
           .from('learning_periods')
-          .select('period_name, start_date, end_date')
-          .eq('target_role', role)
-          .order('start_date', ascending: true);
+          .select('period_name, start_date, end_date, claim_cutoff_date');
+
+      if (isAllRole) {
+        periodQuery = periodQuery.inFilter('target_role', ['tsc', 'kns']);
+      } else {
+        periodQuery = periodQuery.eq('target_role', role);
+      }
+      final periodsRes = await periodQuery.order('start_date', ascending: true);
 
       if (mounted) {
         setState(() {
@@ -135,8 +146,17 @@ class _QuickLogWidgetState extends State<QuickLogWidget> {
             DateTime? sDate = DateTime.tryParse(period['start_date'] ?? '');
             DateTime? eDate = DateTime.tryParse(period['end_date'] ?? '');
 
-            // Bỏ qua (ẩn) các chặng chưa đến thời gian bắt đầu
+            DateTime? cutoffDate = DateTime.tryParse(
+              period['claim_cutoff_date'] ?? '',
+            );
+            cutoffDate ??= eDate;
+
+            // Bỏ qua (ẩn) các chặng chưa bắt đầu HOẶC ĐÃ QUA NGÀY CHẶN KÊ KHAI (Cut-off date)
             if (sDate != null && now.isBefore(sDate)) {
+              continue;
+            }
+            if (cutoffDate != null &&
+                now.isAfter(cutoffDate.add(const Duration(days: 1)))) {
               continue;
             }
 
@@ -186,7 +206,6 @@ class _QuickLogWidgetState extends State<QuickLogWidget> {
 
             // Ưu tiên 3: Nếu đã qua hết tất cả các chặng, chốt chặng cuối cùng
             _selectedPhase = autoSelect ?? _phaseList.last;
-            _checkLatePhase(_selectedPhase);
           }
           _isLoadingData = false;
         });
@@ -195,31 +214,6 @@ class _QuickLogWidgetState extends State<QuickLogWidget> {
       debugPrint('Lỗi tải dữ liệu ban đầu: $e');
       if (mounted) setState(() => _isLoadingData = false);
     }
-  }
-
-  // Hàm kiểm tra xem chặng được chọn đã quá hạn so với thực tế chưa
-  void _checkLatePhase(String? phaseName) {
-    if (phaseName == null) return;
-    final phase = _phaseDataList.firstWhere(
-      (p) => p['period_name'] == phaseName,
-      orElse: () => {},
-    );
-    if (phase.isNotEmpty) {
-      final endDate = DateTime.tryParse(phase['end_date'] ?? '');
-      // Nếu chọn chặng cũ mà hôm nay đã qua hạn kết thúc
-      if (endDate != null &&
-          DateTime.now().isAfter(endDate.add(const Duration(days: 1)))) {
-        setState(() {
-          _isLatePhase = true;
-          _confirmLate = false; // Bắt người dùng phải tích xác nhận lại
-        });
-        return;
-      }
-    }
-    setState(() {
-      _isLatePhase = false;
-      _confirmLate = false;
-    });
   }
 
   // Hàm tự động gợi ý Chặng phù hợp dựa trên ngày hoàn thành người dùng chọn
@@ -346,7 +340,6 @@ class _QuickLogWidgetState extends State<QuickLogWidget> {
                       Navigator.pop(ctx);
                       setState(() {
                         _selectedPhase = suggestedPhase;
-                        _checkLatePhase(_selectedPhase);
                       });
                     },
                     child: const Text(
@@ -523,7 +516,8 @@ class _QuickLogWidgetState extends State<QuickLogWidget> {
                                 labelText: 'Chặng/Đợt kê khai',
                                 contentPadding: const EdgeInsets.symmetric(
                                   horizontal: 8,
-                                  vertical: 8,
+                                  vertical:
+                                      14, // Tăng từ 8 lên 14 để mở rộng chiều cao form
                                 ),
                                 border: OutlineInputBorder(
                                   borderRadius: BorderRadius.circular(8),
@@ -551,7 +545,6 @@ class _QuickLogWidgetState extends State<QuickLogWidget> {
                               }).toList(),
                               onChanged: (String? newValue) {
                                 setState(() => _selectedPhase = newValue);
-                                _checkLatePhase(newValue); // Gọi check muộn
                               },
                             ),
                           ),
@@ -565,7 +558,8 @@ class _QuickLogWidgetState extends State<QuickLogWidget> {
                                 labelText: 'Nền tảng',
                                 contentPadding: const EdgeInsets.symmetric(
                                   horizontal: 12,
-                                  vertical: 8,
+                                  vertical:
+                                      14, // Tăng từ 8 lên 14 để cao bằng ô bên trái
                                 ),
                                 border: OutlineInputBorder(
                                   borderRadius: BorderRadius.circular(8),
@@ -604,175 +598,39 @@ class _QuickLogWidgetState extends State<QuickLogWidget> {
                         ),
                       ],
                       const SizedBox(height: 12),
-                      // UI Tối ưu diện tích: Gom "Thời gian hoàn thành" và "Thời gian học" lên 1 hàng ngang
+                      // UI Tối ưu diện tích: Gom "Thời gian học" và "Upload minh chứng" lên cùng 1 hàng
                       Row(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          // Cột 1: Thời gian hoàn thành
-                          Expanded(
-                            flex: 5,
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                const Text(
-                                  'Thời gian hoàn thành',
-                                  style: TextStyle(
-                                    fontSize: 13,
-                                    fontWeight: FontWeight.w600,
-                                    color: Colors.black87,
-                                  ),
-                                ),
-                                const SizedBox(height: 8),
-                                Row(
-                                  children: [
-                                    Expanded(
-                                      child: InkWell(
-                                        onTap: () async {
-                                          final now = DateTime.now();
-                                          final initDate =
-                                              _completionDate.isAfter(now)
-                                              ? now
-                                              : _completionDate;
-                                          final pickedDate =
-                                              await showDatePicker(
-                                                context: context,
-                                                initialDate: initDate,
-                                                firstDate: DateTime(2020),
-                                                lastDate: now,
-                                                locale: const Locale(
-                                                  'vi',
-                                                  'VN',
-                                                ), // Ép hiển thị lịch Tiếng Việt
-                                              );
-                                          if (pickedDate != null && mounted) {
-                                            setState(() {
-                                              _completionDate = DateTime(
-                                                pickedDate.year,
-                                                pickedDate.month,
-                                                pickedDate.day,
-                                                _completionDate.hour,
-                                                _completionDate.minute,
-                                              );
-                                            });
-                                          }
-                                        },
-                                        child: Container(
-                                          padding: const EdgeInsets.symmetric(
-                                            horizontal: 4,
-                                            vertical: 12,
-                                          ),
-                                          decoration: BoxDecoration(
-                                            border: Border.all(
-                                              color: Colors.grey.shade400,
-                                            ),
-                                            borderRadius: BorderRadius.circular(
-                                              8,
-                                            ),
-                                          ),
-                                          child: Center(
-                                            child: Text(
-                                              '${_completionDate.day}/${_completionDate.month}/${_completionDate.year}',
-                                              style: const TextStyle(
-                                                fontSize: 12,
-                                                fontWeight: FontWeight.w600,
-                                              ),
-                                            ),
-                                          ),
-                                        ),
-                                      ),
-                                    ),
-                                    const SizedBox(width: 4),
-                                    Expanded(
-                                      child: InkWell(
-                                        onTap: () async {
-                                          final pickedTime = await showTimePicker(
-                                            context: context,
-                                            initialTime: TimeOfDay.fromDateTime(
-                                              _completionDate,
-                                            ),
-                                            builder: (context, child) =>
-                                                MediaQuery(
-                                                  data: MediaQuery.of(context)
-                                                      .copyWith(
-                                                        alwaysUse24HourFormat:
-                                                            true,
-                                                      ),
-                                                  child: child!,
-                                                ),
-                                          );
-                                          if (pickedTime != null &&
-                                              context.mounted) {
-                                            final now = DateTime.now();
-                                            final newDateTime = DateTime(
-                                              _completionDate.year,
-                                              _completionDate.month,
-                                              _completionDate.day,
-                                              pickedTime.hour,
-                                              pickedTime.minute,
-                                            );
-                                            if (newDateTime.isAfter(now)) {
-                                              ScaffoldMessenger.of(
-                                                context,
-                                              ).showSnackBar(
-                                                const SnackBar(
-                                                  content: Text(
-                                                    'Không thể chọn giờ ở tương lai!',
-                                                  ),
-                                                  backgroundColor: Colors.red,
-                                                ),
-                                              );
-                                              return;
-                                            }
-                                            setState(
-                                              () =>
-                                                  _completionDate = newDateTime,
-                                            );
-                                          }
-                                        },
-                                        child: Container(
-                                          padding: const EdgeInsets.symmetric(
-                                            horizontal: 4,
-                                            vertical: 12,
-                                          ),
-                                          decoration: BoxDecoration(
-                                            border: Border.all(
-                                              color: Colors.grey.shade400,
-                                            ),
-                                            borderRadius: BorderRadius.circular(
-                                              8,
-                                            ),
-                                          ),
-                                          child: Center(
-                                            child: Text(
-                                              '${_completionDate.hour.toString().padLeft(2, '0')}:${_completionDate.minute.toString().padLeft(2, '0')}',
-                                              style: const TextStyle(
-                                                fontSize: 12,
-                                                fontWeight: FontWeight.w600,
-                                              ),
-                                            ),
-                                          ),
-                                        ),
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ],
-                            ),
-                          ),
-                          const SizedBox(width: 12),
-                          // Cột 2: Thời gian học (Số giờ/phút)
+                          // Cột 1: Thời gian học (Số giờ/phút) và Hệ thống ghi nhận
                           Expanded(
                             flex: 4,
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                const Text(
-                                  'Số giờ đã học',
-                                  style: TextStyle(
-                                    fontSize: 13,
-                                    fontWeight: FontWeight.w600,
-                                    color: Colors.black87,
-                                  ),
+                                Row(
+                                  children: [
+                                    const Text(
+                                      'Số giờ đã học',
+                                      style: TextStyle(
+                                        fontSize: 13,
+                                        fontWeight: FontWeight.w600,
+                                        color: Colors.black87,
+                                      ),
+                                    ),
+                                    if (_totalCalculatedMinutes > 0) ...[
+                                      const SizedBox(width: 6),
+                                      Text(
+                                        '(Quy đổi: $_totalCalculatedMinutes phút)',
+                                        style: const TextStyle(
+                                          color: Colors.green,
+                                          fontWeight: FontWeight.bold,
+                                          fontSize: 12,
+                                          fontStyle: FontStyle.italic,
+                                        ),
+                                      ),
+                                    ],
+                                  ],
                                 ),
                                 const SizedBox(height: 8),
                                 Row(
@@ -800,7 +658,7 @@ class _QuickLogWidgetState extends State<QuickLogWidget> {
                                         ),
                                       ),
                                     ),
-                                    const SizedBox(width: 4),
+                                    const SizedBox(width: 8),
                                     Expanded(
                                       child: TextField(
                                         controller: _minutesController,
@@ -829,300 +687,314 @@ class _QuickLogWidgetState extends State<QuickLogWidget> {
                               ],
                             ),
                           ),
+                          if (_userRole == 'kns') ...[
+                            const SizedBox(width: 12),
+                            // Cột 2: Nâng cấp UI Upload minh chứng (KNS) chuẩn App xịn
+                            Expanded(
+                              flex: 5,
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  const Text(
+                                    'Tải lên minh chứng',
+                                    style: TextStyle(
+                                      fontSize: 13,
+                                      fontWeight: FontWeight.w600,
+                                      color: Colors.black87,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 8),
+                                  InkWell(
+                                    onTap: () async {
+                                      if (_selectedAttachments.length >=
+                                          _maxKnsImages) {
+                                        ScaffoldMessenger.of(
+                                          context,
+                                        ).showSnackBar(
+                                          SnackBar(
+                                            content: Text(
+                                              'Bạn chỉ được tải lên tối đa $_maxKnsImages ảnh minh chứng!',
+                                            ),
+                                            backgroundColor: Colors.red,
+                                          ),
+                                        );
+                                        return;
+                                      }
+
+                                      FilePickerResult? result =
+                                          await FilePicker.pickFiles(
+                                            type: FileType.custom,
+                                            allowedExtensions: [
+                                              'jpg',
+                                              'jpeg',
+                                              'png',
+                                            ],
+                                            allowMultiple: true,
+                                            withData: kIsWeb,
+                                          );
+                                      if (!context.mounted) return;
+
+                                      if (result != null) {
+                                        if (_selectedAttachments.length +
+                                                result.files.length >
+                                            _maxKnsImages) {
+                                          ScaffoldMessenger.of(
+                                            context,
+                                          ).showSnackBar(
+                                            SnackBar(
+                                              content: Text(
+                                                'Số lượng vượt quá giới hạn. Chỉ được chọn thêm ${_maxKnsImages - _selectedAttachments.length} ảnh!',
+                                              ),
+                                              backgroundColor: Colors.red,
+                                            ),
+                                          );
+                                          return;
+                                        }
+
+                                        showDialog(
+                                          context: context,
+                                          barrierDismissible: false,
+                                          builder: (BuildContext context) {
+                                            return const Center(
+                                              child:
+                                                  CircularProgressIndicator(),
+                                            );
+                                          },
+                                        );
+
+                                        List<Map<String, dynamic>>
+                                        newAttachments = [];
+
+                                        for (var file in result.files) {
+                                          if (file.path == null &&
+                                              file.bytes == null) {
+                                            continue;
+                                          }
+
+                                          String finalFileName = file.name;
+                                          Uint8List? finalBytes = file.bytes;
+                                          String? finalPath = file.path;
+                                          int sizeInBytes = file.size;
+
+                                          try {
+                                            if (kIsWeb && finalBytes != null) {
+                                              var compressedBytes =
+                                                  await FlutterImageCompress.compressWithList(
+                                                    finalBytes,
+                                                    minWidth: 1080,
+                                                    minHeight: 1080,
+                                                    quality: 70,
+                                                    format: CompressFormat.jpeg,
+                                                  );
+                                              finalBytes = compressedBytes;
+                                              sizeInBytes =
+                                                  compressedBytes.length;
+                                              finalFileName =
+                                                  'compressed_$finalFileName';
+                                            } else if (!kIsWeb &&
+                                                finalPath != null) {
+                                              var compressedFile =
+                                                  await FlutterImageCompress.compressAndGetFile(
+                                                    finalPath,
+                                                    '${finalPath}_compressed_${DateTime.now().millisecondsSinceEpoch}.jpg',
+                                                    quality: 70,
+                                                    minWidth: 1080,
+                                                    minHeight: 1080,
+                                                    format: CompressFormat.jpeg,
+                                                  );
+                                              if (compressedFile != null) {
+                                                finalPath = compressedFile.path;
+                                                finalBytes =
+                                                    await compressedFile
+                                                        .readAsBytes();
+                                                sizeInBytes = finalBytes.length;
+                                                finalFileName =
+                                                    'compressed_$finalFileName';
+                                              }
+                                            }
+                                          } catch (e) {
+                                            debugPrint('Lỗi nén ảnh: $e');
+                                          }
+
+                                          if (sizeInBytes <= 5242880) {
+                                            newAttachments.add({
+                                              'name': finalFileName,
+                                              'path': finalPath,
+                                              'bytes': finalBytes,
+                                              'size': sizeInBytes,
+                                            });
+                                          } else {
+                                            if (context.mounted) {
+                                              ScaffoldMessenger.of(
+                                                context,
+                                              ).showSnackBar(
+                                                SnackBar(
+                                                  content: Text(
+                                                    'Ảnh $finalFileName sau nén vẫn > 5MB, đã bị bỏ qua!',
+                                                  ),
+                                                  backgroundColor: Colors.red,
+                                                ),
+                                              );
+                                            }
+                                          }
+                                        }
+
+                                        if (context.mounted) {
+                                          Navigator.pop(context);
+                                        }
+
+                                        setState(() {
+                                          _selectedAttachments.addAll(
+                                            newAttachments,
+                                          );
+                                        });
+                                      }
+                                    },
+                                    borderRadius: BorderRadius.circular(8),
+                                    child: Container(
+                                      height:
+                                          48, // Ép chiều cao bằng với TextField bên trái để cân đối
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 12,
+                                      ),
+                                      decoration: BoxDecoration(
+                                        color: _selectedAttachments.isNotEmpty
+                                            ? Colors.green.shade50
+                                            : Colors.grey.shade50,
+                                        borderRadius: BorderRadius.circular(8),
+                                        border: Border.all(
+                                          color: _selectedAttachments.isNotEmpty
+                                              ? Colors.green.shade400
+                                              : Colors.grey.shade400,
+                                          style: BorderStyle.solid,
+                                          width: 1,
+                                        ),
+                                      ),
+                                      child: Row(
+                                        children: [
+                                          Icon(
+                                            _selectedAttachments.isNotEmpty
+                                                ? Icons.check_circle
+                                                : Icons.cloud_upload_outlined,
+                                            color:
+                                                _selectedAttachments.isNotEmpty
+                                                ? Colors.green
+                                                : Colors.blue.shade700,
+                                            size: 20,
+                                          ),
+                                          const SizedBox(width: 8),
+                                          Expanded(
+                                            child: Column(
+                                              mainAxisAlignment:
+                                                  MainAxisAlignment.center,
+                                              crossAxisAlignment:
+                                                  CrossAxisAlignment.start,
+                                              children: [
+                                                Text(
+                                                  _selectedAttachments
+                                                          .isNotEmpty
+                                                      ? '${_selectedAttachments.length}/$_maxKnsImages ảnh'
+                                                      : 'Tải lên minh chứng',
+                                                  style: TextStyle(
+                                                    fontWeight: FontWeight.bold,
+                                                    fontSize: 12,
+                                                    color:
+                                                        _selectedAttachments
+                                                            .isNotEmpty
+                                                        ? Colors.green.shade800
+                                                        : Colors.black87,
+                                                  ),
+                                                  maxLines: 1,
+                                                  overflow:
+                                                      TextOverflow.ellipsis,
+                                                ),
+                                                const Text(
+                                                  'JPG, PNG (<5MB)',
+                                                  style: TextStyle(
+                                                    fontSize: 10,
+                                                    color: Colors.grey,
+                                                  ),
+                                                ),
+                                              ],
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ] else ...[
+                            const SizedBox(width: 12),
+                            const Spacer(
+                              flex: 5,
+                            ), // Spacer giả lập để giữ khung "Số giờ" không bị kéo dãn to bè khi không có box upload
+                          ],
                         ],
                       ),
 
-                      // Chuyển dòng hiển thị phút ra khỏi Container để không làm hỏng bố cục
-                      if (_totalCalculatedMinutes > 0)
-                        Padding(
-                          padding: const EdgeInsets.only(top: 12.0),
-                          child: Align(
-                            alignment: Alignment.centerLeft,
-                            child: Text(
-                              'Hệ thống ghi nhận: $_totalCalculatedMinutes phút',
-                              style: const TextStyle(
-                                color: Colors.green,
-                                fontWeight: FontWeight.bold,
-                                fontSize: 13,
-                              ),
+                      // Render danh sách ảnh đã chọn ngay bên dưới hàng
+                      if (_userRole == 'kns' &&
+                          _selectedAttachments.isNotEmpty) ...[
+                        const SizedBox(height: 12),
+                        ..._selectedAttachments.map((att) {
+                          int index = _selectedAttachments.indexOf(att);
+                          return Container(
+                            margin: const EdgeInsets.only(bottom: 8),
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 12,
+                              vertical: 8,
                             ),
-                          ),
-                        ),
+                            decoration: BoxDecoration(
+                              color: Colors.white,
+                              border: Border.all(color: Colors.grey.shade300),
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: Row(
+                              children: [
+                                const Icon(
+                                  Icons.image,
+                                  color: Colors.blue,
+                                  size: 20,
+                                ),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(
+                                    att['name'],
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(fontSize: 13),
+                                  ),
+                                ),
+                                IconButton(
+                                  icon: const Icon(
+                                    Icons.close,
+                                    color: Colors.red,
+                                    size: 20,
+                                  ),
+                                  padding: EdgeInsets.zero,
+                                  constraints: const BoxConstraints(),
+                                  onPressed: () {
+                                    setState(() {
+                                      _selectedAttachments.removeAt(index);
+                                    });
+                                  },
+                                ),
+                              ],
+                            ),
+                          );
+                        }),
+                      ],
                     ],
                   ),
             const SizedBox(height: 16),
-
-            // Nâng cấp UI Upload minh chứng (KNS) chuẩn App xịn
-            if (_userRole == 'kns') ...[
-              InkWell(
-                onTap: () async {
-                  if (_selectedAttachments.length >= _maxKnsImages) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(
-                        content: Text(
-                          'Bạn chỉ được tải lên tối đa $_maxKnsImages ảnh minh chứng!',
-                        ),
-                        backgroundColor: Colors.red,
-                      ),
-                    );
-                    return;
-                  }
-
-                  FilePickerResult? result = await FilePicker.pickFiles(
-                    type: FileType.custom,
-                    allowedExtensions: ['jpg', 'jpeg', 'png'],
-                    allowMultiple: true, // Bật tính năng chọn nhiều file
-                    withData: kIsWeb,
-                  );
-                  if (!context.mounted) return;
-
-                  if (result != null) {
-                    if (_selectedAttachments.length + result.files.length >
-                        _maxKnsImages) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(
-                          content: Text(
-                            'Số lượng vượt quá giới hạn. Chỉ được chọn thêm ${_maxKnsImages - _selectedAttachments.length} ảnh!',
-                          ),
-                          backgroundColor: Colors.red,
-                        ),
-                      );
-                      return;
-                    }
-
-                    // Hiện popup loading trong lúc xử lý nén nhiều file
-                    showDialog(
-                      context: context,
-                      barrierDismissible: false,
-                      builder: (BuildContext context) {
-                        return const Center(child: CircularProgressIndicator());
-                      },
-                    );
-
-                    List<Map<String, dynamic>> newAttachments = [];
-
-                    for (var file in result.files) {
-                      if (file.path == null && file.bytes == null) continue;
-
-                      String finalFileName = file.name;
-                      Uint8List? finalBytes = file.bytes;
-                      String? finalPath = file.path;
-                      int sizeInBytes = file.size;
-
-                      try {
-                        if (kIsWeb && finalBytes != null) {
-                          var compressedBytes =
-                              await FlutterImageCompress.compressWithList(
-                                finalBytes,
-                                minWidth: 1080,
-                                minHeight: 1080,
-                                quality: 70,
-                                format: CompressFormat.jpeg,
-                              );
-                          finalBytes = compressedBytes;
-                          sizeInBytes = compressedBytes.length;
-                          finalFileName = 'compressed_$finalFileName';
-                        } else if (!kIsWeb && finalPath != null) {
-                          var compressedFile =
-                              await FlutterImageCompress.compressAndGetFile(
-                                finalPath,
-                                '${finalPath}_compressed_${DateTime.now().millisecondsSinceEpoch}.jpg',
-                                quality: 70,
-                                minWidth: 1080,
-                                minHeight: 1080,
-                                format: CompressFormat.jpeg,
-                              );
-                          if (compressedFile != null) {
-                            finalPath = compressedFile.path;
-                            finalBytes = await compressedFile.readAsBytes();
-                            sizeInBytes = finalBytes.length;
-                            finalFileName = 'compressed_$finalFileName';
-                          }
-                        }
-                      } catch (e) {
-                        debugPrint('Lỗi nén ảnh: $e');
-                      }
-
-                      if (sizeInBytes <= 5242880) {
-                        // Giới hạn 5MB sau khi nén
-                        newAttachments.add({
-                          'name': finalFileName,
-                          'path': finalPath,
-                          'bytes': finalBytes,
-                          'size': sizeInBytes,
-                        });
-                      } else {
-                        if (context.mounted) {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(
-                              content: Text(
-                                'Ảnh $finalFileName sau nén vẫn > 5MB, đã bị bỏ qua!',
-                              ),
-                              backgroundColor: Colors.red,
-                            ),
-                          );
-                        }
-                      }
-                    }
-
-                    if (context.mounted) Navigator.pop(context); // Tắt loading
-
-                    setState(() {
-                      _selectedAttachments.addAll(newAttachments);
-                    });
-                  }
-                },
-                borderRadius: BorderRadius.circular(8),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                    vertical: 14,
-                    horizontal: 16,
-                  ),
-                  decoration: BoxDecoration(
-                    color: _selectedAttachments.isNotEmpty
-                        ? Colors.green.shade50
-                        : Colors.grey.shade50,
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(
-                      color: _selectedAttachments.isNotEmpty
-                          ? Colors.green.shade400
-                          : Colors.grey.shade300,
-                      style: BorderStyle.solid,
-                      width: 1.5,
-                    ),
-                  ),
-                  child: Row(
-                    children: [
-                      Icon(
-                        _selectedAttachments.isNotEmpty
-                            ? Icons.check_circle
-                            : Icons.cloud_upload_outlined,
-                        color: _selectedAttachments.isNotEmpty
-                            ? Colors.green
-                            : Colors.blue.shade700,
-                        size: 28,
-                      ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              _selectedAttachments.isNotEmpty
-                                  ? 'Đã đính kèm ${_selectedAttachments.length}/$_maxKnsImages ảnh'
-                                  : 'Tải lên minh chứng (Tối đa $_maxKnsImages ảnh)',
-                              style: TextStyle(
-                                fontWeight: FontWeight.bold,
-                                color: _selectedAttachments.isNotEmpty
-                                    ? Colors.green.shade800
-                                    : Colors.black87,
-                              ),
-                            ),
-                            const Text(
-                              'Hỗ trợ JPG, PNG (Tối đa 5MB/ảnh)',
-                              style: TextStyle(
-                                fontSize: 12,
-                                color: Colors.grey,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-              const SizedBox(height: 8),
-
-              // Render ra danh sách các ảnh đã chọn
-              if (_selectedAttachments.isNotEmpty)
-                ..._selectedAttachments.map((att) {
-                  int index = _selectedAttachments.indexOf(att);
-                  return Container(
-                    margin: const EdgeInsets.only(bottom: 8),
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 8,
-                    ),
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      border: Border.all(color: Colors.grey.shade300),
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: Row(
-                      children: [
-                        const Icon(Icons.image, color: Colors.blue, size: 20),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Text(
-                            att['name'],
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(fontSize: 13),
-                          ),
-                        ),
-                        IconButton(
-                          icon: const Icon(
-                            Icons.close,
-                            color: Colors.red,
-                            size: 20,
-                          ),
-                          padding: EdgeInsets.zero,
-                          constraints: const BoxConstraints(),
-                          onPressed: () {
-                            setState(() {
-                              _selectedAttachments.removeAt(index);
-                            });
-                          },
-                        ),
-                      ],
-                    ),
-                  );
-                }),
-              const SizedBox(height: 12),
-            ],
-            // CẢNH BÁO ĐỎ NẾU CHỌN CHẶNG ĐÃ QUA
-            if (_isLatePhase) ...[
-              Container(
-                padding: const EdgeInsets.all(8),
-                decoration: BoxDecoration(
-                  color: Colors.red.shade50,
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: Colors.red.shade200),
-                ),
-                child: Row(
-                  children: [
-                    Checkbox(
-                      value: _confirmLate,
-                      activeColor: Colors.red,
-                      onChanged: (val) =>
-                          setState(() => _confirmLate = val ?? false),
-                    ),
-                    const Expanded(
-                      child: Text(
-                        'Cảnh báo: Thời gian ghi nhận cho chặng này đã qua. Bạn có chắc chắn muốn ghi nhận muộn không?',
-                        style: TextStyle(
-                          color: Colors.red,
-                          fontSize: 13,
-                          fontWeight: FontWeight.w500,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 12),
-            ],
-
             // Nút Lưu mở rộng toàn màn hình
             SizedBox(
               width: double.infinity,
               height: 46,
               child: ElevatedButton.icon(
-                // Block nút Ghi nhận nếu đang lưu hoặc (Kê khai muộn mà chưa tích xác nhận)
-                onPressed: (_isSaving || (_isLatePhase && !_confirmLate))
-                    ? null
-                    : _saveLearningHours,
+                onPressed: _isSaving ? null : _saveLearningHours,
                 icon: _isSaving
                     ? const SizedBox(
                         width: 18,

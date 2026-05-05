@@ -21,6 +21,7 @@ class _HomeScreenState extends State<HomeScreen> {
   String _division = 'Đang tải...';
   String _department = ''; // Thêm biến lưu tên phòng ban
   bool _isKNS = false;
+  bool _isAllRole = false; // Vai trò lai Phòng B
   bool _isAdmin = false; // Biến kiểm tra phân quyền Admin
   String? _avatarUrl; // Link ảnh Avatar
   String _activePeriodName = 'Đợt hiện tại';
@@ -170,11 +171,36 @@ class _HomeScreenState extends State<HomeScreen> {
                                 adminEmails.add('hapt12@vietinbank.vn');
                               }
 
-                              // Thông tin tài khoản trạm gửi đi
-                              String username = 'toituhocvtb@gmail.com';
-                              // NHẬP 16 KÝ TỰ MẬT KHẨU ỨNG DỤNG CỦA ANH VÀO ĐÂY:
-                              String appPassword = 'recsazybhaaqfqzx';
+                              // Thông tin tài khoản trạm gửi đi (Lấy từ bảng system_configs)
+                              String username = '';
+                              String appPassword = '';
 
+                              final smtpConfigRes = await Supabase
+                                  .instance
+                                  .client
+                                  .from('system_configs')
+                                  .select('config_key, config_value')
+                                  .inFilter('config_key', [
+                                    'smtp_username',
+                                    'smtp_password',
+                                  ]);
+
+                              for (var row in smtpConfigRes) {
+                                if (row['config_key'] == 'smtp_username') {
+                                  username =
+                                      row['config_value']?.toString() ?? '';
+                                }
+                                if (row['config_key'] == 'smtp_password') {
+                                  appPassword =
+                                      row['config_value']?.toString() ?? '';
+                                }
+                              }
+
+                              if (username.isEmpty || appPassword.isEmpty) {
+                                throw Exception(
+                                  'Chưa cấu hình tài khoản Email gửi đi (smtp_username / smtp_password) trong hệ thống!',
+                                );
+                              }
                               final smtpServer = gmail(username, appPassword);
                               final currentUserId =
                                   Supabase
@@ -294,11 +320,16 @@ $content
       if (userId == null) return;
 
       // 1. Tải danh sách chặng và LỌC chuẩn hóa theo mốc thời gian
-      final periodsRes = await Supabase.instance.client
+      var query = Supabase.instance.client
           .from('learning_periods')
-          .select('period_name, start_date, end_date')
-          .eq('target_role', _isKNS ? 'kns' : 'tsc')
-          .order('start_date', ascending: true);
+          .select('period_name, start_date, end_date, target_role');
+
+      if (_isAllRole) {
+        query = query.inFilter('target_role', ['tsc', 'kns']);
+      } else {
+        query = query.eq('target_role', _isKNS ? 'kns' : 'tsc');
+      }
+      final periodsRes = await query.order('start_date', ascending: true);
 
       final now = DateTime.now();
       List<Map<String, dynamic>> validPeriods = [];
@@ -398,7 +429,7 @@ $content
       final appResponse = await Supabase.instance.client
           .from('practical_applications')
           .select(
-            'gamification_points, is_shared_group, coffee_talk_name, is_speaker, created_at',
+            'gamification_points, is_shared_group, coffee_talk_name, is_speaker, created_at, ai_score',
           )
           .eq('user_id', userId);
 
@@ -408,7 +439,14 @@ $content
           coffeePts = 0,
           speakerPts = 0; // Lưu điểm riêng từng mục
 
-      // Lấy trực tiếp điểm setup từ rulesRes để tính toán
+      // Lấy cấu hình điểm linh hoạt
+      int knsMaxAi = 20;
+      int tscMaxAi = 10;
+      for (var r in rulesRes) {
+        if (r['rule_key'] == 'kns_max_ai') knsMaxAi = r['points'];
+        if (r['rule_key'] == 'tsc_max_ai') tscMaxAi = r['points'];
+      }
+
       int shareConfigPts =
           (rulesRes as List).firstWhere(
             (r) => r['rule_key'] == 'share_group',
@@ -433,28 +471,44 @@ $content
         if (createdAt != null && sDate != null && eDate != null) {
           if (createdAt.isAfter(sDate.subtract(const Duration(days: 1))) &&
               createdAt.isBefore(eDate.add(const Duration(days: 1)))) {
-            totalPts += (row['gamification_points'] as num?)?.toInt() ?? 0;
-            aiPts += (row['ai_score'] as num?)?.toInt() ?? 0;
+            int rawGamificationPts =
+                (row['gamification_points'] as num?)?.toInt() ?? 0;
+            int rawAiPts = (row['ai_score'] as num?)?.toInt() ?? 0;
+
+            // Nếu User 'all' đang xem đợt TSC, điểm cá nhân hiển thị trên topbar cũng scale tương ứng
+            if (_isAllRole && activePeriod['target_role'] == 'tsc') {
+              double scaled =
+                  rawAiPts * (tscMaxAi / (knsMaxAi > 0 ? knsMaxAi : 1));
+              totalPts += scaled.round();
+              aiPts += scaled.round();
+            } else {
+              totalPts += rawGamificationPts;
+              aiPts += rawAiPts;
+            }
+
             products++;
-            if (row['is_shared_group'] == true) {
+
+            // Tiêu chí phụ: ẩn/không cộng nếu User 'all' đang xem đợt TSC
+            bool skipExtra =
+                (_isAllRole && activePeriod['target_role'] == 'tsc');
+
+            if (row['is_shared_group'] == true && !skipExtra) {
               shares++;
               sharePts += shareConfigPts;
             }
             if (row['coffee_talk_name'] != null &&
-                row['coffee_talk_name'].toString().trim().isNotEmpty) {
+                row['coffee_talk_name'].toString().trim().isNotEmpty &&
+                !skipExtra) {
               coffee++;
               coffeePts += coffeeConfigPts;
             }
-            if (row['is_speaker'] == true) {
+            if (row['is_speaker'] == true && !skipExtra) {
               speakers++;
               speakerPts += speakerConfigPts;
             }
           }
         }
       }
-
-      // QUAN TRỌNG: Quy đổi 1 phút = 1 điểm, cộng thẳng vào tổng điểm
-      totalPts += totalMins;
 
       // 5. Build danh sách thẻ KNS động kèm Điểm hiển thị
       List<Map<String, dynamic>> dynamicCards = [];
@@ -513,6 +567,17 @@ $content
         return;
       }
 
+      // Lấy cấu hình điểm max AI
+      final rulesRes = await Supabase.instance.client
+          .from('gamification_rules')
+          .select('rule_key, points');
+      int knsMaxAi = 20;
+      int tscMaxAi = 10;
+      for (var r in rulesRes) {
+        if (r['rule_key'] == 'kns_max_ai') knsMaxAi = r['points'];
+        if (r['rule_key'] == 'tsc_max_ai') tscMaxAi = r['points'];
+      }
+
       // TẢI DỮ LIỆU TỪ BẢNG ẢO
       List<dynamic> events = [];
       int start = 0;
@@ -520,7 +585,7 @@ $content
         final res = await Supabase.instance.client
             .from('v_leaderboard_events')
             .select(
-              'user_id, division, department_id, role, hours, points, event_date',
+              'user_id, division, department_id, role, hours, points, ai_points, event_date',
             )
             .range(start, start + 999);
         events.addAll(res);
@@ -528,7 +593,14 @@ $content
         start += 1000;
       }
 
-      String targetRole = _isKNS ? 'kns' : 'tsc'; // Role của đợt đang xét
+      // Role của đợt đang xét dựa trên lựa chọn filter
+      String targetRole = 'tsc';
+      if (_selectedFilterPeriod != null &&
+          _selectedFilterPeriod!.containsKey('target_role')) {
+        targetRole = _selectedFilterPeriod!['target_role'] ?? 'tsc';
+      } else if (_isKNS) {
+        targetRole = 'kns';
+      }
 
       Map<String, int> userHours = {};
       Map<String, int> userPoints = {};
@@ -540,7 +612,9 @@ $content
       // Failsafe: Khởi tạo cho chính mình để xử lý điểm 0
       userHours[currentUserId] = 0;
       userPoints[currentUserId] = 0;
-      if (!_isKNS) sysUserIds.add(currentUserId);
+
+      // Khởi tạo List hệ thống dựa trên đợt đang xem
+      if (targetRole == 'tsc' || _isAllRole) sysUserIds.add(currentUserId);
       divUserIds.add(currentUserId);
       if (_departmentId != null) deptUserIds.add(currentUserId);
 
@@ -552,12 +626,15 @@ $content
 
         String userRole = ev['role']?.toString() ?? '';
 
-        // CỐT LÕI: CHỈ LỌC NHỮNG NGƯỜI CÙNG ROLE VỚI ĐỢT ĐANG CHỌN ĐỂ XẾP HẠNG
-        if (userRole != targetRole) continue;
+        // CỐT LÕI: Lọc người cùng role hoặc role 'all'
+        if (userRole != targetRole && userRole != 'all') continue;
 
         if (!processedUsers.contains(uid)) {
           processedUsers.add(uid);
-          if (targetRole == 'tsc') sysUserIds.add(uid);
+          if (targetRole == 'tsc') {
+            // Toàn hệ thống lấy mix tsc và all
+            sysUserIds.add(uid);
+          }
           if (ev['division'] == _division) divUserIds.add(uid);
           if (ev['department_id']?.toString() == _departmentId) {
             deptUserIds.add(uid);
@@ -567,6 +644,13 @@ $content
         DateTime? recordDate = DateTime.tryParse(ev['event_date'] ?? '');
         int hrs = (ev['hours'] as num?)?.toInt() ?? 0;
         int pts = (ev['points'] as num?)?.toInt() ?? 0;
+        int aiPts = (ev['ai_points'] as num?)?.toInt() ?? 0;
+
+        // Xử lý chia tỷ lệ điểm nếu Đợt là TSC và user là Hybrid ('all')
+        if (targetRole == 'tsc' && userRole == 'all') {
+          double scaled = aiPts * (tscMaxAi / (knsMaxAi > 0 ? knsMaxAi : 1));
+          pts = scaled.round();
+        }
 
         if (recordDate != null && sDate != null && eDate != null) {
           if (recordDate.isAfter(sDate.subtract(const Duration(days: 1))) &&
@@ -576,11 +660,6 @@ $content
           }
         }
       }
-
-      // Quy đổi 1 phút học = 1 điểm cộng dồn vào bảng điểm
-      userPoints.forEach((uid, pts) {
-        userPoints[uid] = pts + (userHours[uid] ?? 0);
-      });
 
       // Hàm Helper để xếp hạng (LOẠI NGƯỜI 0 ĐIỂM)
       int getRank(
@@ -604,13 +683,13 @@ $content
         setState(() {
           _rankHoursDept = getRank(deptUserIds, userHours, currentUserId);
           _rankHoursDiv = getRank(divUserIds, userHours, currentUserId);
-          if (!_isKNS) {
+          if (!_isKNS || _isAllRole) {
             _rankHoursSys = getRank(sysUserIds, userHours, currentUserId);
           }
 
           _rankPointsDept = getRank(deptUserIds, userPoints, currentUserId);
           _rankPointsDiv = getRank(divUserIds, userPoints, currentUserId);
-          if (!_isKNS) {
+          if (!_isKNS || _isAllRole) {
             _rankPointsSys = getRank(sysUserIds, userPoints, currentUserId);
           }
         });
@@ -665,6 +744,7 @@ $content
             _departmentId = data['department_id']
                 ?.toString(); // Ép kiểu sang chuỗi để tránh lỗi type int
             _isKNS = (data['role'] == 'kns');
+            _isAllRole = (data['role'] == 'all');
             _avatarUrl = data['avatar_url'];
 
             // Phân quyền Admin: Đọc trực tiếp cờ is_admin từ Database
@@ -948,30 +1028,55 @@ $content
               ],
             ),
             const SizedBox(height: 12),
-            // UX/UI Mới: Thẻ thống kê cuộn ngang linh hoạt chiều cao
-            SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              clipBehavior: Clip.none, // Giữ bóng đổ (box-shadow) không bị cắt
-              child: IntrinsicHeight(
-                child: Row(
-                  crossAxisAlignment:
-                      CrossAxisAlignment.stretch, // Ép các thẻ cao bằng nhau
-                  children: [
-                    GestureDetector(
-                      onTap: () => Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                          builder: (context) =>
-                              const HistoryScreen(initialIndex: 0),
-                        ),
-                      ),
-                      child: _buildStatCard(
-                        'Tổng giờ học',
-                        '$_totalHours phút\n(+$_totalHours đ)',
-                        Colors.blue,
+            // UX/UI Mới: Phân cấp rõ ràng 2 tiêu chí chính
+            Row(
+              children: [
+                Expanded(
+                  child: GestureDetector(
+                    onTap: () => Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (context) =>
+                            const HistoryScreen(initialIndex: 0),
                       ),
                     ),
-                    const SizedBox(width: 12),
+                    child: _buildStatCard(
+                      'Tổng giờ học',
+                      '$_totalHours phút',
+                      Colors.green,
+                      isHighlight: true,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: _buildStatCard(
+                    'Tổng điểm ứng dụng',
+                    '$_totalPoints điểm',
+                    Colors.blue,
+                    isHighlight: true,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            const Text(
+              'Chi tiết điểm ứng dụng',
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.bold,
+                color: Colors.grey,
+              ),
+            ),
+            const SizedBox(height: 8),
+            // Dải cuộn ngang cho các thẻ chi tiết phụ
+            SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              clipBehavior: Clip.none,
+              child: IntrinsicHeight(
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
                     GestureDetector(
                       onTap: () => Navigator.push(
                         context,
@@ -984,9 +1089,11 @@ $content
                         'SP Ứng dụng',
                         '$_totalProducts SP\n(+$_totalAiPts đ)',
                         Colors.red,
+                        isHighlight: false,
+                        isDetail: true,
                       ),
                     ),
-                    if (_isKNS)
+                    if (_isKNS) ...[
                       ..._knsDynamicCards.map(
                         (card) => Padding(
                           padding: const EdgeInsets.only(left: 12.0),
@@ -994,15 +1101,12 @@ $content
                             card['name'],
                             card['value'],
                             card['color'],
+                            isHighlight: false,
+                            isDetail: true,
                           ),
                         ),
                       ),
-                    const SizedBox(width: 12),
-                    _buildStatCard(
-                      'Tổng điểm',
-                      '$_totalPoints điểm',
-                      Colors.blue,
-                    ),
+                    ],
                   ],
                 ),
               ),
@@ -1048,7 +1152,20 @@ $content
     );
   }
 
-  Widget _buildStatCard(String title, String value, MaterialColor color) {
+  Widget _buildStatCard(
+    String title,
+    String value,
+    MaterialColor color, {
+    bool isHighlight = false,
+    bool isDetail = false,
+  }) {
+    // Thu nhỏ thẻ chi tiết xuống 130px trên Mobile để nhìn được nhiều hơn, giữ 150px trên Web
+    // Các thẻ highlight (Hàng trên) không bị ép Width vì được quản lý bởi Expanded
+    double? cardWidth;
+    if (isDetail) {
+      cardWidth = MediaQuery.of(context).size.width < 600 ? 130 : 150;
+    }
+
     IconData cardIcon = Icons.local_fire_department;
     if (title.toLowerCase().contains('giờ')) {
       cardIcon = Icons.timer;
@@ -1071,19 +1188,31 @@ $content
     }
 
     return Container(
-      width: 150, // Cố định độ rộng để thẻ hiển thị chuẩn khi cuộn
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      width: cardWidth,
+      padding: EdgeInsets.symmetric(
+        horizontal: isHighlight ? 16 : 12,
+        vertical: isHighlight ? 16 : 8,
+      ),
       decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(12),
+        color: isHighlight ? null : Colors.white,
+        gradient: isHighlight
+            ? LinearGradient(
+                colors: [color.shade400, color.shade700],
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+              )
+            : null,
+        borderRadius: BorderRadius.circular(isHighlight ? 16 : 12),
         boxShadow: [
           BoxShadow(
-            color: color.withValues(alpha: 0.1),
-            blurRadius: 4,
-            offset: const Offset(0, 2),
+            color: color.withValues(alpha: isHighlight ? 0.3 : 0.05),
+            blurRadius: isHighlight ? 8 : 4,
+            offset: Offset(0, isHighlight ? 4 : 2),
           ),
         ],
-        border: Border.all(color: color.shade100, width: 1),
+        border: isHighlight
+            ? null
+            : Border.all(color: color.shade100, width: 1),
       ),
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
@@ -1091,29 +1220,35 @@ $content
         children: [
           Row(
             children: [
-              Icon(cardIcon, color: color, size: 18),
-              const SizedBox(width: 6),
+              Icon(
+                cardIcon,
+                color: isHighlight ? Colors.white : color,
+                size: isHighlight ? 22 : 18,
+              ),
+              const SizedBox(width: 8),
               Expanded(
                 child: Text(
                   title,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
-                    fontSize: 11,
-                    color: Colors.grey[700],
+                    fontSize: isHighlight ? 13 : 11,
+                    color: isHighlight
+                        ? Colors.white.withValues(alpha: 0.9)
+                        : Colors.grey[700],
                     fontWeight: FontWeight.w600,
                   ),
                 ),
               ),
             ],
           ),
-          const SizedBox(height: 8),
+          SizedBox(height: isHighlight ? 12 : 8),
           Text(
             value,
             style: TextStyle(
-              fontSize: 15,
+              fontSize: isHighlight ? 20 : 15,
               fontWeight: FontWeight.w900,
-              color: color.shade700,
+              color: isHighlight ? Colors.white : color.shade700,
             ),
           ),
         ],
@@ -1187,9 +1322,13 @@ $content
                   color,
                 ),
               ),
-              if (!_isKNS) ...[
+              if (!_isKNS ||
+                  (_isAllRole &&
+                      _selectedFilterPeriod?['target_role'] == 'tsc')) ...[
                 Container(width: 1, height: 30, color: Colors.grey.shade300),
-                Expanded(child: _buildRankItem('Toàn hàng', rankSys, color)),
+                Expanded(
+                  child: _buildRankItem('Toàn hệ thống', rankSys, color),
+                ),
               ],
             ],
           ),
