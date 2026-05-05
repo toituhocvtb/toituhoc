@@ -1,7 +1,6 @@
-import 'dart:typed_data';
-
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:excel/excel.dart' hide Border;
@@ -25,8 +24,10 @@ class _ReportScreenState extends State<ReportScreen> {
   // Lựa chọn bộ lọc
   List<String> _periodOptions = ['Toàn chặng (Tích lũy)'];
   String _selectedPeriod = 'Toàn chặng (Tích lũy)';
+  String _allRoleSystemMode =
+      'tsc'; // Nút Toggle chuyển Hệ thi đua (Chỉ dùng cho Role ALL)
 
-  final List<String> _scopeOptions = const [
+  List<String> _scopeOptions = [
     'Toàn hệ thống',
     'Khối của tôi',
     'Phòng của tôi',
@@ -48,6 +49,55 @@ class _ReportScreenState extends State<ReportScreen> {
   List<dynamic> _periodsConfig = []; // Cấu hình các chặng để gom nhóm lịch sử
   List<Map<String, dynamic>> _top5List = [];
   Map<String, dynamic>? _myRankData;
+
+  // Hàm tự động tính toán danh sách Dropdown Thời gian dựa theo Role
+  void _updatePeriodDropdownState() {
+    List<String> fetchedPeriods = [];
+    String? activePeriodName;
+    final now = DateTime.now();
+
+    for (var p in _periodsConfig) {
+      // BỘ LỌC MỚI: Nếu là Role ALL, chỉ lấy các chặng thuộc hệ thi đua đang chọn (TSC hoặc KNS)
+      if (_userRole == 'all' && p['target_role'] != _allRoleSystemMode) {
+        continue;
+      }
+
+      String pName = p['period_name'] as String;
+      DateTime? sDate = DateTime.tryParse(p['start_date'] ?? '');
+      DateTime? eDate = DateTime.tryParse(p['end_date'] ?? '');
+
+      // Bỏ qua (ẩn) các chặng chưa đến thời gian bắt đầu
+      if (sDate != null && now.isBefore(sDate)) {
+        continue;
+      }
+
+      // Tự động gắn nhãn (Đang Active) nếu ngày hiện tại nằm trong thời gian diễn ra chặng
+      if (sDate != null && eDate != null) {
+        if (now.isAfter(sDate.subtract(const Duration(days: 1))) &&
+            now.isBefore(eDate.add(const Duration(days: 1)))) {
+          pName = '$pName (Đang Active)';
+          activePeriodName = pName;
+        }
+      }
+      fetchedPeriods.add(pName);
+    }
+
+    setState(() {
+      _periodOptions = ['Toàn chặng (Tích lũy)', ...fetchedPeriods];
+
+      // Tự động trỏ bộ lọc: Ưu tiên chặng Active -> Chặng gần nhất -> Toàn chặng
+      // Giữ lại lựa chọn cũ nếu nó vẫn nằm trong list mới (khi user chuyển tab qua lại)
+      if (_periodOptions.contains(_selectedPeriod)) {
+        // Không đổi _selectedPeriod
+      } else if (activePeriodName != null) {
+        _selectedPeriod = activePeriodName;
+      } else if (fetchedPeriods.isNotEmpty) {
+        _selectedPeriod = fetchedPeriods.last;
+      } else {
+        _selectedPeriod = 'Toàn chặng (Tích lũy)';
+      }
+    });
+  }
 
   @override
   void initState() {
@@ -78,6 +128,12 @@ class _ReportScreenState extends State<ReportScreen> {
         _userDivision = profile['division'] ?? '';
         _userDeptId = profile['department_id'];
         _isAdmin = profile['is_admin'] == true;
+
+        // Xử lý bộ lọc phạm vi cho KNS (Không có Toàn hệ thống, mặc định xem của Phòng)
+        if (_userRole == 'kns' && !_isAdmin) {
+          _scopeOptions = ['Khối của tôi', 'Phòng của tôi'];
+          _selectedScope = 'Phòng của tôi';
+        }
 
         // Kiểm tra xem user hiện tại có đích danh là đầu mối (level2_user_id) của phòng này không
         if (_userDeptId != null) {
@@ -123,48 +179,13 @@ class _ReportScreenState extends State<ReportScreen> {
       final periodsRes = await query.order('start_date', ascending: true);
       _periodsConfig =
           periodsRes; // Lưu lại để dùng cho việc phân nhóm danh sách
-      List<String> fetchedPeriods = [];
-      String? activePeriodName;
-      final now = DateTime.now();
-
-      for (var p in periodsRes) {
-        String pName = p['period_name'] as String;
-        DateTime? sDate = DateTime.tryParse(p['start_date'] ?? '');
-        DateTime? eDate = DateTime.tryParse(p['end_date'] ?? '');
-
-        // Bỏ qua (ẩn) các chặng chưa đến thời gian bắt đầu
-        if (sDate != null && now.isBefore(sDate)) {
-          continue;
-        }
-
-        // Tự động gắn nhãn (Đang Active) nếu ngày hiện tại nằm trong thời gian diễn ra chặng
-        if (sDate != null && eDate != null) {
-          if (now.isAfter(sDate.subtract(const Duration(days: 1))) &&
-              now.isBefore(eDate.add(const Duration(days: 1)))) {
-            pName = '$pName (Đang Active)';
-            activePeriodName = pName;
-          }
-        }
-        fetchedPeriods.add(pName);
-      }
 
       // 3. Tải toàn bộ Data để xử lý Ranking
       await _aggregateLeaderboardData(periodsRes);
 
       if (mounted) {
+        _updatePeriodDropdownState(); // Gọi hàm cập nhật danh sách đợt/chặng theo Hệ Thi Đua
         setState(() {
-          _periodOptions = ['Toàn chặng (Tích lũy)', ...fetchedPeriods];
-
-          // Tự động trỏ bộ lọc vào đợt đang Active
-          if (activePeriodName != null) {
-            _selectedPeriod = activePeriodName;
-          } else if (fetchedPeriods.isNotEmpty) {
-            _selectedPeriod = fetchedPeriods
-                .last; // Fallback: Nếu không có đợt active, lấy đợt gần nhất
-          } else {
-            _selectedPeriod = 'Toàn chặng (Tích lũy)';
-          }
-
           _isLoading = false;
         });
         _processRanking(); // Tính toán vị trí ban đầu
@@ -915,6 +936,149 @@ class _ReportScreenState extends State<ReportScreen> {
     }
   }
 
+  Future<void> _editLearningRecord(
+    Map<String, dynamic> item,
+    String currentPeriod,
+  ) async {
+    // Tìm chặng/đợt tương ứng để kiểm tra cutoff date
+    Map<String, dynamic>? matchedPeriod;
+    for (var p in _periodsConfig) {
+      if (p['period_name'] == currentPeriod ||
+          '${p['period_name']} (Đang Active)' == currentPeriod) {
+        matchedPeriod = p;
+        break;
+      }
+    }
+
+    if (matchedPeriod != null && matchedPeriod['claim_cutoff_date'] != null) {
+      try {
+        DateTime cutoff = DateTime.parse(
+          matchedPeriod['claim_cutoff_date'],
+        ).toLocal();
+        // Cho phép sửa đến hết ngày cutoff (23:59:59)
+        cutoff = DateTime(cutoff.year, cutoff.month, cutoff.day, 23, 59, 59);
+        if (DateTime.now().isAfter(cutoff)) {
+          if (!mounted) return;
+          showDialog(
+            context: context,
+            builder: (ctx) => AlertDialog(
+              title: const Row(
+                children: [
+                  Icon(Icons.lock_clock, color: Colors.orange),
+                  SizedBox(width: 8),
+                  Text('Đã hết hạn sửa'),
+                ],
+              ),
+              content: const Text(
+                'Chặng thi đua này đã vượt quá thời gian gia hạn (Cut-off date) của Admin. Bạn không thể sửa thời gian học nữa.',
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('Đóng'),
+                ),
+              ],
+            ),
+          );
+          return;
+        }
+      } catch (e) {
+        debugPrint('Lỗi parse cutoff date: $e');
+      }
+    }
+
+    final TextEditingController timeController = TextEditingController(
+      text: item['duration_minutes'].toString(),
+    );
+    final formKey = GlobalKey<FormState>();
+
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Sửa thời gian học'),
+        content: Form(
+          key: formKey,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Khóa học: ${item['course_name']}',
+                style: const TextStyle(fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 16),
+              TextFormField(
+                controller: timeController,
+                keyboardType: TextInputType.number,
+                inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                decoration: const InputDecoration(
+                  labelText: 'Thời gian học (phút)',
+                  border: OutlineInputBorder(),
+                  suffixText: 'phút',
+                ),
+                validator: (val) {
+                  if (val == null || val.trim().isEmpty) {
+                    return 'Vui lòng nhập số phút';
+                  }
+                  final numVal = int.tryParse(val.trim());
+                  if (numVal == null || numVal <= 0) {
+                    return 'Số phút phải > 0';
+                  }
+                  return null;
+                },
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Hủy', style: TextStyle(color: Colors.grey)),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              if (formKey.currentState!.validate()) {
+                Navigator.pop(ctx, true);
+              }
+            },
+            child: const Text('Lưu thay đổi'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm != true) return;
+
+    setState(() => _isLoadingHistory = true);
+    try {
+      final newTime = int.parse(timeController.text.trim());
+      await Supabase.instance.client
+          .from('learning_hours')
+          .update({'duration_minutes': newTime})
+          .eq('id', item['id']);
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Cập nhật thời gian học thành công'),
+            backgroundColor: Colors.green,
+          ),
+        );
+        _fetchInitialData();
+      }
+    } catch (e) {
+      setState(() => _isLoadingHistory = false);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Lỗi khi cập nhật: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
   Future<void> _deleteLearningRecord(String recordId, String courseName) async {
     // BƯỚC 1: KIỂM TRA XEM KHÓA HỌC NÀY ĐÃ CÓ ỨNG DỤNG ĐI KÈM CHƯA
     setState(() => _isLoadingHistory = true);
@@ -1356,6 +1520,20 @@ class _ReportScreenState extends State<ReportScreen> {
                                                     ),
                                                     IconButton(
                                                       icon: const Icon(
+                                                        Icons.edit_outlined,
+                                                        color:
+                                                            Colors.blueAccent,
+                                                        size: 22,
+                                                      ),
+                                                      tooltip: 'Sửa thời gian',
+                                                      onPressed: () =>
+                                                          _editLearningRecord(
+                                                            item,
+                                                            currentPeriod,
+                                                          ),
+                                                    ),
+                                                    IconButton(
+                                                      icon: const Icon(
                                                         Icons.delete_outline,
                                                         color: Colors.redAccent,
                                                         size: 22,
@@ -1644,6 +1822,57 @@ class _ReportScreenState extends State<ReportScreen> {
             // TAB 2: BẢNG XẾP HẠNG
             Column(
               children: [
+                // [UI/UX] Chỉ hiển thị Segmented Button chọn Hệ Thi đua cho Role ALL
+                if (_userRole == 'all')
+                  Container(
+                    color: Colors.white,
+                    padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+                    width: double.infinity,
+                    child: SegmentedButton<String>(
+                      segments: const [
+                        ButtonSegment(
+                          value: 'tsc',
+                          label: Text('Thi đua TSC'),
+                          icon: Icon(Icons.account_balance, size: 18),
+                        ),
+                        ButtonSegment(
+                          value: 'kns',
+                          label: Text('Thi đua KNS'),
+                          icon: Icon(Icons.groups, size: 18),
+                        ),
+                      ],
+                      selected: {_allRoleSystemMode},
+                      onSelectionChanged: (Set<String> newSelection) {
+                        setState(() {
+                          _allRoleSystemMode = newSelection.first;
+                        });
+                        _updatePeriodDropdownState(); // Reset Dropdown theo Hệ vừa chọn
+                        _processRanking(); // Tải lại BXH
+                      },
+                      style: ButtonStyle(
+                        backgroundColor: WidgetStateProperty.resolveWith<Color>(
+                          (states) {
+                            if (states.contains(WidgetState.selected)) {
+                              return _allRoleSystemMode == 'tsc'
+                                  ? Colors.blue.shade50
+                                  : Colors.orange.shade50;
+                            }
+                            return Colors.transparent;
+                          },
+                        ),
+                        iconColor: WidgetStateProperty.resolveWith<Color>((
+                          states,
+                        ) {
+                          if (states.contains(WidgetState.selected)) {
+                            return _allRoleSystemMode == 'tsc'
+                                ? Colors.blue.shade700
+                                : Colors.orange.shade700;
+                          }
+                          return Colors.grey;
+                        }),
+                      ),
+                    ),
+                  ),
                 Container(
                   padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
                   color: Colors.white,

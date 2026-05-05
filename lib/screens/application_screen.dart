@@ -83,15 +83,20 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
   bool _hasCoffeeRule = false;
   bool _hasSpeakerRule = false;
 
+  Future<void> _initAllData() async {
+    // Chờ tất cả dữ liệu nền tảng và cấu hình động tải xong
+    await Future.wait([_fetchUserRole(), _fetchCourses(), _fetchPointRules()]);
+    // Chỉ tắt vòng xoay khi mọi cấu hình đã sẵn sàng
+    if (mounted) setState(() => _isLoadingRole = false);
+  }
+
   @override
   void initState() {
     super.initState();
     if (widget.initialCourse != null) {
       _selectedCourse = widget.initialCourse;
     }
-    _fetchUserRole();
-    _fetchCourses();
-    _fetchPointRules();
+    _initAllData();
 
     // Lắng nghe thao tác gõ phím để cập nhật bộ đếm từ lập tức
     _learningsController.addListener(() {
@@ -112,8 +117,8 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
 
   // Tải cấu hình điểm & số lượng ảnh từ Database
   Future<void> _fetchPointRules() async {
+    // 1. Tải số lượng ảnh (Tách try-catch riêng biệt để chống lỗi vỡ luồng)
     try {
-      // 1. Tải số lượng ảnh
       final configRes = await Supabase.instance.client
           .from('system_configs')
           .select();
@@ -121,48 +126,56 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
         setState(() {
           for (var row in configRes) {
             if (row['config_value'] == null) continue;
+            int? parsedValue = int.tryParse(row['config_value'].toString());
+            if (parsedValue == null) continue;
+
             switch (row['config_key']) {
               case 'max_app_tsc_images':
-                _maxAppTscImages = row['config_value'] as int;
+                _maxAppTscImages = parsedValue;
                 break;
               case 'max_app_kns_images':
-                _maxAppKnsImages = row['config_value'] as int;
+                _maxAppKnsImages = parsedValue;
                 break;
               case 'max_share_kns_images':
-                _maxShareKnsImages = row['config_value'] as int;
+                _maxShareKnsImages = parsedValue;
                 break;
               case 'max_speaker_kns_images':
-                _maxSpeakerKnsImages = row['config_value'] as int;
+                _maxSpeakerKnsImages = parsedValue;
                 break;
             }
           }
         });
       }
+    } catch (e) {
+      debugPrint('Lỗi tải cấu hình ảnh: $e');
+    }
 
-      // 2. Tải điểm Gamification
+    // 2. Tải điểm Gamification
+    try {
       final res = await Supabase.instance.client
           .from('gamification_rules')
           .select();
       if (mounted) {
         setState(() {
           for (var row in res) {
+            int pts = int.tryParse(row['points'].toString()) ?? 0;
             switch (row['rule_key']) {
               case 'kns_max_ai':
-                _knsMaxAi = row['points'] as int;
+                _knsMaxAi = pts;
                 break;
               case 'tsc_max_ai':
-                _tscMaxAi = row['points'] as int;
+                _tscMaxAi = pts;
                 break;
               case 'share_group':
-                _shareGroupPts = row['points'] as int;
+                _shareGroupPts = pts;
                 _hasShareRule = true;
                 break;
               case 'coffee_talk':
-                _coffeeTalkPts = row['points'] as int;
+                _coffeeTalkPts = pts;
                 _hasCoffeeRule = true;
                 break;
               case 'speaker':
-                _speakerPts = row['points'] as int;
+                _speakerPts = pts;
                 _hasSpeakerRule = true;
                 break;
             }
@@ -349,7 +362,6 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
       await _fetchPhases();
     } catch (e) {
       debugPrint('Lỗi tải role: $e');
-      if (mounted) setState(() => _isLoadingRole = false);
     }
   }
 
@@ -407,12 +419,10 @@ class _ApplicationScreenState extends State<ApplicationScreen> {
           _selectedPhase =
               activePhase ??
               (phases.isNotEmpty ? phases.first['period_name'] : null);
-          _isLoadingRole = false; // Tắt loading tổng của màn hình
         });
       }
     } catch (e) {
       debugPrint('Lỗi tải danh sách chặng: $e');
-      if (mounted) setState(() => _isLoadingRole = false);
     }
   }
 

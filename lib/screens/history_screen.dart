@@ -145,10 +145,16 @@ class _HistoryScreenState extends State<HistoryScreen> {
 
       // Tính lại tổng điểm
       int totalPoints = aiScore;
-      if (item['is_shared_group'] == true) totalPoints += _shareGroupPts;
-      if (item['is_coffee_talk'] == true) totalPoints += _coffeeTalkPts;
-      if (item['is_speaker'] == true) totalPoints += _speakerPts;
-
+      if (item['is_shared_group'] == true) {
+        totalPoints += _shareGroupPts;
+      }
+      if (item['coffee_talk_name'] != null &&
+          item['coffee_talk_name'].toString().isNotEmpty) {
+        totalPoints += _coffeeTalkPts;
+      }
+      if (item['is_speaker'] == true) {
+        totalPoints += _speakerPts;
+      }
       // Cập nhật Database
       await Supabase.instance.client
           .from('practical_applications')
@@ -197,7 +203,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
       final appsRes = await Supabase.instance.client
           .from('practical_applications')
           .select(
-            'id, course_name, gamification_points, created_at, key_learnings, practical_results, ai_feedback, ai_grade_status, ai_score, is_shared_group, is_coffee_talk, is_speaker',
+            'id, course_name, gamification_points, created_at, key_learnings, practical_results, ai_feedback, ai_grade_status, ai_score, is_shared_group, coffee_talk_name, is_speaker',
           )
           .eq('user_id', userId)
           .order('created_at', ascending: false);

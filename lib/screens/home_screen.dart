@@ -743,10 +743,9 @@ $content
             _department = fetchedDept;
             _departmentId = data['department_id']
                 ?.toString(); // Ép kiểu sang chuỗi để tránh lỗi type int
-            _isKNS = (data['role'] == 'kns');
+            _isKNS = (data['role'] == 'kns' || data['role'] == 'all');
             _isAllRole = (data['role'] == 'all');
             _avatarUrl = data['avatar_url'];
-
             // Phân quyền Admin: Đọc trực tiếp cờ is_admin từ Database
             _isAdmin = data['is_admin'] == true;
           } else {

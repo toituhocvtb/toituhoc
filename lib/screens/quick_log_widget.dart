@@ -104,7 +104,8 @@ class _QuickLogWidgetState extends State<QuickLogWidget> {
       // Tải kèm start_date, end_date, và claim_cutoff_date để xử lý logic ẩn/hiện chặng
       var periodQuery = Supabase.instance.client
           .from('learning_periods')
-          .select('period_name, start_date, end_date, claim_cutoff_date');
+          .select('period_name, start_date, end_date, claim_cutoff_date')
+          .eq('is_active', true);
 
       if (isAllRole) {
         periodQuery = periodQuery.inFilter('target_role', ['tsc', 'kns']);
@@ -129,7 +130,8 @@ class _QuickLogWidgetState extends State<QuickLogWidget> {
 
           _userRole = role;
           if (configRes != null && configRes['config_value'] != null) {
-            _maxKnsImages = configRes['config_value'] as int;
+            _maxKnsImages =
+                int.tryParse(configRes['config_value'].toString()) ?? 1;
           }
 
           // Tự động format tên chặng kèm thời gian thực tế từ DB cho Dropdown
@@ -151,10 +153,8 @@ class _QuickLogWidgetState extends State<QuickLogWidget> {
             );
             cutoffDate ??= eDate;
 
-            // Bỏ qua (ẩn) các chặng chưa bắt đầu HOẶC ĐÃ QUA NGÀY CHẶN KÊ KHAI (Cut-off date)
-            if (sDate != null && now.isBefore(sDate)) {
-              continue;
-            }
+            // Bỏ qua (ẩn) các chặng ĐÃ QUA NGÀY CHẶN KÊ KHAI (Cut-off date)
+            // Ghi chú: Không ẩn chặng chưa bắt đầu vì Admin đã chủ động mở sớm bằng is_active = TRUE
             if (cutoffDate != null &&
                 now.isAfter(cutoffDate.add(const Duration(days: 1)))) {
               continue;
@@ -168,9 +168,34 @@ class _QuickLogWidgetState extends State<QuickLogWidget> {
             }
             _phaseDataList.add(period);
           }
-          _phaseList = _phaseDataList
-              .map((e) => e['period_name'] as String)
-              .toList();
+
+          // [UI/UX] XỬ LÝ RIÊNG CHO ROLE ALL: Gộp hiển thị để không bắt User phải chọn 1 trong 2
+          if (isAllRole && _phaseDataList.length > 1) {
+            String combinedName = _phaseDataList
+                .map((e) => e['period_name'].toString().split(' (').first)
+                .join(' & ');
+            String combinedDates = 'Tích lũy kép';
+            _phaseList = ['$combinedName ($combinedDates)'];
+
+            // Ghi đè list nội bộ để validation khoảng thời gian (từ Start sớm nhất đến End muộn nhất) pass thành công
+            DateTime? firstStart = DateTime.tryParse(
+              _phaseDataList.first['start_date'] ?? '',
+            );
+            DateTime? lastEnd = DateTime.tryParse(
+              _phaseDataList.last['end_date'] ?? '',
+            );
+            _phaseDataList = [
+              {
+                'period_name': _phaseList.first,
+                'start_date': firstStart?.toIso8601String(),
+                'end_date': lastEnd?.toIso8601String(),
+              },
+            ];
+          } else {
+            _phaseList = _phaseDataList
+                .map((e) => e['period_name'] as String)
+                .toList();
+          }
 
           if (_phaseList.isEmpty) {
             _phaseList = ['Đợt hiện tại'];
@@ -581,6 +606,35 @@ class _QuickLogWidgetState extends State<QuickLogWidget> {
                           ),
                         ],
                       ),
+                      // Hiển thị gợi ý UI/UX cho Role ALL
+                      if (_userRole == 'kns' &&
+                          _phaseList.isNotEmpty &&
+                          _phaseList.first.contains('Tích lũy kép')) ...[
+                        const Padding(
+                          padding: EdgeInsets.only(top: 8.0, bottom: 4.0),
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Icon(
+                                Icons.info_outline,
+                                color: Colors.blue,
+                                size: 16,
+                              ),
+                              SizedBox(width: 6),
+                              Expanded(
+                                child: Text(
+                                  'Đặc quyền: Thành tích của bạn sẽ được tự động ghi nhận đồng thời cho cả 2 bảng xếp hạng (TSC & KNS).',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: Colors.blue,
+                                    fontStyle: FontStyle.italic,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
                       if (_selectedPlatform == 'Khác') ...[
                         const SizedBox(height: 12),
                         TextField(
