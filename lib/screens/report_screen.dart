@@ -35,8 +35,6 @@ class _ReportScreenState extends State<ReportScreen> {
   String _selectedScope = 'Toàn hệ thống';
 
   int _metricIndex = 0; // 0 = Giờ học, 1 = Điểm ứng dụng
-  int _knsMaxAi = 20;
-  int _tscMaxAi = 10;
 
   // --- STATE CHO TAB LỊCH SỬ CÁ NHÂN ---
   int _historyMetricIndex = 0; // 0 = Giờ học, 1 = Ứng dụng
@@ -47,8 +45,14 @@ class _ReportScreenState extends State<ReportScreen> {
   // Dữ liệu hiển thị
   List<Map<String, dynamic>> _allRawData = []; // Dữ liệu hiển thị
   List<dynamic> _periodsConfig = []; // Cấu hình các chặng để gom nhóm lịch sử
-  List<Map<String, dynamic>> _top5List = [];
+
+  // Biến phục vụ Lazy Load Bảng Xếp Hạng
+  List<Map<String, dynamic>> _rankingData = [];
+  int _currentOffset = 0;
+  bool _hasMoreData = true;
+  bool _isLoadingMore = false;
   Map<String, dynamic>? _myRankData;
+  bool _isInitialPeriodSet = false; // Biến kiểm soát gán mặc định Đợt/Chặng
 
   // Hàm tự động tính toán danh sách Dropdown Thời gian dựa theo Role
   void _updatePeriodDropdownState() {
@@ -86,15 +90,21 @@ class _ReportScreenState extends State<ReportScreen> {
       _periodOptions = ['Toàn chặng (Tích lũy)', ...fetchedPeriods];
 
       // Tự động trỏ bộ lọc: Ưu tiên chặng Active -> Chặng gần nhất -> Toàn chặng
-      // Giữ lại lựa chọn cũ nếu nó vẫn nằm trong list mới (khi user chuyển tab qua lại)
-      if (_periodOptions.contains(_selectedPeriod)) {
-        // Không đổi _selectedPeriod
-      } else if (activePeriodName != null) {
-        _selectedPeriod = activePeriodName;
-      } else if (fetchedPeriods.isNotEmpty) {
-        _selectedPeriod = fetchedPeriods.last;
-      } else {
-        _selectedPeriod = 'Toàn chặng (Tích lũy)';
+      if (!_isInitialPeriodSet) {
+        // Lần đầu tải app: Ép thẳng vào Đợt/Chặng đang Active
+        _selectedPeriod =
+            activePeriodName ??
+            (fetchedPeriods.isNotEmpty
+                ? fetchedPeriods.last
+                : 'Toàn chặng (Tích lũy)');
+        _isInitialPeriodSet = true;
+      } else if (!_periodOptions.contains(_selectedPeriod)) {
+        // Khi đổi Hệ thi đua (TSC <-> KNS), chặng cũ không còn thì gán lại chặng Active
+        _selectedPeriod =
+            activePeriodName ??
+            (fetchedPeriods.isNotEmpty
+                ? fetchedPeriods.last
+                : 'Toàn chặng (Tích lũy)');
       }
     });
   }
@@ -149,14 +159,7 @@ class _ReportScreenState extends State<ReportScreen> {
         }
       }
 
-      // Tải cấu hình điểm chuẩn hóa linh hoạt từ Admin
-      final rulesRes = await Supabase.instance.client
-          .from('gamification_rules')
-          .select('rule_key, points');
-      for (var r in rulesRes) {
-        if (r['rule_key'] == 'kns_max_ai') _knsMaxAi = r['points'];
-        if (r['rule_key'] == 'tsc_max_ai') _tscMaxAi = r['points'];
-      }
+      // (Đã xóa đoạn tải gamification_rules vì logic tính điểm chuẩn hóa KNS/TSC đã được chuyển lên xử lý trực tiếp tại hàm RPC trên Supabase Server)
 
       // 2. Tải danh sách Đợt/Chặng (Lọc theo Role nếu không phải Admin)
       var query = Supabase.instance.client
@@ -180,15 +183,15 @@ class _ReportScreenState extends State<ReportScreen> {
       _periodsConfig =
           periodsRes; // Lưu lại để dùng cho việc phân nhóm danh sách
 
-      // 3. Tải toàn bộ Data để xử lý Ranking
-      await _aggregateLeaderboardData(periodsRes);
+      // 3. Bỏ qua tải data khổng lồ ban đầu để tránh tốn API
+      // Data sẽ chỉ được tải khi bấm nút Xuất báo cáo (Lazy Load)
 
       if (mounted) {
         _updatePeriodDropdownState(); // Gọi hàm cập nhật danh sách đợt/chặng theo Hệ Thi Đua
         setState(() {
           _isLoading = false;
         });
-        _processRanking(); // Tính toán vị trí ban đầu
+        _processRanking(); // Gọi RPC để lấy đúng BXH hiển thị
       }
     } catch (e) {
       debugPrint('Lỗi tải dữ liệu báo cáo: $e');
@@ -371,8 +374,8 @@ class _ReportScreenState extends State<ReportScreen> {
     );
   }
 
-  // Hàm gom dữ liệu 1 lần duy nhất bằng Bảng Ảo (Siêu nhẹ, siêu tiết kiệm token)
-  Future<void> _aggregateLeaderboardData(List<dynamic> allPeriodsConfig) async {
+  // Hàm tải toàn bộ dữ liệu thô (CHỈ CHẠY KHI ADMIN/ĐẦU MỐI BẤM NÚT TẢI BÁO CÁO)
+  Future<void> _prepareDataForExport(List<dynamic> allPeriodsConfig) async {
     List<dynamic> events = [];
     int start = 0;
     while (true) {
@@ -498,205 +501,96 @@ class _ReportScreenState extends State<ReportScreen> {
     _allRawData.add({'config_helper': allPeriodsConfig});
   }
 
-  void _processRanking() {
-    if (_allRawData.isEmpty) return;
+  // Tải BXH từ Database bằng RPC với Pagination (Chỉ tải những ai cần xem)
+  Future<void> _processRanking({bool isLoadMore = false}) async {
+    if (_userId.isEmpty) return;
 
-    final allPeriodsConfig = _allRawData.last['config_helper'] as List<dynamic>;
-    var usersOnly = _allRawData.sublist(0, _allRawData.length - 1);
+    if (!isLoadMore) {
+      _currentOffset = 0;
+      _hasMoreData = true;
+      if (mounted) setState(() => _rankingData.clear());
+    } else {
+      if (mounted) setState(() => _isLoadingMore = true);
+    }
 
-    // 1. Gán giá trị So sánh dựa trên Period đang chọn
-    for (var u in usersOnly) {
-      bool isSystemScope = _selectedScope == 'Toàn hệ thống';
+    String searchPeriodName = _selectedPeriod;
+    // SỬA LỖI: Bỏ qua cắt chuỗi nếu đang chọn 'Toàn chặng (Tích lũy)' để Database không bị tìm sai tên đợt
+    if (searchPeriodName != 'Toàn chặng (Tích lũy)' &&
+        searchPeriodName.contains(' (')) {
+      searchPeriodName = searchPeriodName
+          .substring(0, searchPeriodName.indexOf(' ('))
+          .trim();
+    }
 
-      if (_selectedPeriod == 'Toàn chặng (Tích lũy)') {
-        int totalPts = 0;
-        int totalHrs = 0;
+    try {
+      int limit = isLoadMore ? 10 : 5;
 
-        if (u['raw_app_dates'] != null) {
-          for (var item in (u['raw_app_dates'] as List)) {
-            if (isSystemScope && u['role'] == 'all') {
-              // Chuẩn hóa điểm cho Phòng B khi vào BXH toàn hàng (Bỏ qua điểm cộng)
-              double scaled =
-                  (item['ai_val'] as int) *
-                  (_tscMaxAi / (_knsMaxAi > 0 ? _knsMaxAi : 1));
-              totalPts += scaled.round();
-            } else {
-              totalPts += item['val'] as int; // Bao gồm cả ai_val + extra_val
-            }
-          }
-        }
+      // 1. IN RA ĐỂ BẮT LỖI THÔNG SỐ GỬI ĐI
+      debugPrint('--- [DEBUG] THÔNG SỐ GỬI XUỐNG DB ---');
+      debugPrint(
+        'Scope: $_selectedScope | Division: "$_userDivision" | DeptId: $_userDeptId | Metric: $_metricIndex',
+      );
 
-        if (u['raw_hour_dates'] != null) {
-          for (var item in (u['raw_hour_dates'] as List)) {
-            totalHrs += item['val'] as int;
-          }
-        }
+      final res = await Supabase.instance.client.rpc(
+        'get_smart_leaderboard',
+        params: {
+          'p_period': searchPeriodName,
+          'p_scope': _selectedScope,
+          'p_role_mode': _userRole == 'all' ? _allRoleSystemMode : _userRole,
+          'p_division': _userDivision,
+          'p_dept_id': _userDeptId ?? 0,
+          'p_metric': _metricIndex,
+          'p_limit': limit,
+          'p_offset': _currentOffset,
+          'p_req_user_id': _userId,
+        },
+      );
 
-        u['sort_points'] = totalPts;
-        u['sort_hours'] = totalHrs;
-      } else {
-        String searchPeriodName = _selectedPeriod;
-        if (searchPeriodName.contains(' (')) {
-          searchPeriodName = searchPeriodName
-              .substring(0, searchPeriodName.indexOf(' ('))
-              .trim();
-        }
+      // 2. IN RA KẾT QUẢ DB TRẢ VỀ
+      debugPrint('--- [DEBUG] KẾT QUẢ TỪ DB ---');
+      debugPrint(res.toString());
 
-        int periodPts = 0;
-        int periodHrs = 0;
+      final List<dynamic> fetchedData = res as List<dynamic>;
 
-        final specificConfig = allPeriodsConfig
-            .where(
-              (p) =>
-                  (p['period_name']?.toString().trim() ?? '') ==
-                  searchPeriodName,
-            )
-            .toList();
-
-        DateTime? s;
-        DateTime? e;
-        if (specificConfig.isNotEmpty) {
-          s = DateTime.tryParse(specificConfig.first['start_date'] ?? '');
-          e = DateTime.tryParse(specificConfig.first['end_date'] ?? '');
-        }
-
-        if (s != null && e != null && u['raw_app_dates'] != null) {
-          for (var item in (u['raw_app_dates'] as List)) {
-            if (item['date'] != null &&
-                item['date'].isAfter(s.subtract(const Duration(days: 1))) &&
-                item['date'].isBefore(e.add(const Duration(days: 1)))) {
-              if (isSystemScope && u['role'] == 'all') {
-                // Chuẩn hóa điểm cho Phòng B khi vào BXH toàn hàng (Bỏ qua điểm cộng)
-                double scaled =
-                    (item['ai_val'] as int) *
-                    (_tscMaxAi / (_knsMaxAi > 0 ? _knsMaxAi : 1));
-                periodPts += scaled.round();
-              } else {
-                periodPts += item['val'] as int;
+      if (mounted) {
+        setState(() {
+          if (isLoadMore) {
+            // Thêm data mới và lọc trùng lặp (vì người tải thêm có thể đã xuất hiện trong cụm Hàng xóm)
+            for (var item in fetchedData) {
+              if (!_rankingData.any(
+                (existing) => existing['id'] == item['id'],
+              )) {
+                _rankingData.add(item as Map<String, dynamic>);
               }
             }
+            _isLoadingMore = false;
+            if (fetchedData.length < limit) _hasMoreData = false;
+            _currentOffset += limit;
+          } else {
+            _rankingData = List<Map<String, dynamic>>.from(fetchedData);
+            // Cập nhật thẻ Sticky "Thành tích của Bạn" ở dưới cùng màn hình
+            int myIndex = _rankingData.indexWhere((u) => u['id'] == _userId);
+            _myRankData = myIndex != -1 ? _rankingData[myIndex] : null;
+
+            _currentOffset = limit;
+            if (fetchedData.length < limit) _hasMoreData = false;
           }
-        }
-
-        if (u['raw_hour_dates'] != null) {
-          for (var item in (u['raw_hour_dates'] as List)) {
-            String itemPhaseRaw = item['phase_batch']?.toString().trim() ?? '';
-            String cleanItemPhase = itemPhaseRaw.contains(' (')
-                ? itemPhaseRaw.substring(0, itemPhaseRaw.indexOf(' (')).trim()
-                : itemPhaseRaw;
-
-            final bool phaseMatched = cleanItemPhase == searchPeriodName;
-            final bool dateMatched =
-                s != null &&
-                e != null &&
-                item['date'] != null &&
-                item['date'].isAfter(s.subtract(const Duration(days: 1))) &&
-                item['date'].isBefore(e.add(const Duration(days: 1)));
-
-            if (phaseMatched || dateMatched) {
-              periodHrs += item['val'] as int;
-            }
-          }
-        }
-
-        u['sort_points'] = periodPts;
-        u['sort_hours'] = periodHrs;
+          // Sắp xếp lại danh sách theo thứ tự hạng để UI chèn Gap mượt mà
+          _rankingData.sort(
+            (a, b) => (a['rank'] as int).compareTo(b['rank'] as int),
+          );
+        });
       }
+    } catch (e) {
+      debugPrint('Lỗi tải BXH từ Database: $e');
+      if (mounted) setState(() => _isLoadingMore = false);
     }
-
-    // 2. Lọc theo Phạm vi (Scope) VÀ Role của Đợt/Chặng
-    var filtered = usersOnly.where((u) {
-      // 2.1. Lọc theo Role của Đợt/Chặng đang chọn
-      if (_selectedPeriod != 'Toàn chặng (Tích lũy)') {
-        String searchPeriodName = _selectedPeriod;
-        if (searchPeriodName.contains(' (')) {
-          searchPeriodName = searchPeriodName
-              .substring(0, searchPeriodName.indexOf(' ('))
-              .trim();
-        }
-
-        final specificConfig = allPeriodsConfig
-            .where(
-              (p) =>
-                  (p['period_name']?.toString().trim() ?? '') ==
-                  searchPeriodName,
-            )
-            .toList();
-
-        if (specificConfig.isNotEmpty) {
-          String targetRole = specificConfig.first['target_role'] ?? '';
-          // Cho phép role 'all' (Phòng B) lọt qua mọi rào cản Role của đợt
-          if (u['role'] != targetRole && u['role'] != 'all') {
-            return false;
-          }
-        }
-      }
-
-      // 2.2. Lọc theo Phạm vi (Scope)
-      if (_selectedScope == 'Khối của tôi') {
-        return u['division'] == _userDivision;
-      }
-      if (_selectedScope == 'Phòng của tôi') {
-        return u['department_id'] == _userDeptId;
-      }
-      // Toàn hệ thống: TSC và B (all) hiển thị chung, loại bỏ KNS thuần (Phòng A)
-      if (_selectedScope == 'Toàn hệ thống') {
-        if (u['role'] == 'kns') return false;
-      }
-      return true;
-    }).toList();
-
-    debugPrint(
-      '[BXH] period=$_selectedPeriod | scope=$_selectedScope | metric=$_metricIndex | usersOnly=${usersOnly.length}',
-    );
-
-    debugPrint(
-      '[BXH] trước filter: '
-      'withHours=${usersOnly.where((u) => ((u['sort_hours'] ?? 0) as int) > 0).length}, '
-      'withPoints=${usersOnly.where((u) => ((u['sort_points'] ?? 0) as int) > 0).length}',
-    );
-
-    // 3. Lọc bỏ những người có điểm/giờ = 0 để BXH không bị loãng
-    filtered = filtered.where((u) {
-      final h = (u['sort_hours'] as int?) ?? 0;
-      final p = (u['sort_points'] as int?) ?? 0;
-
-      // Cho phép người có điểm HOẶC có giờ học đều được hiển thị để tránh lỗi BXH trắng
-      return h > 0 || p > 0;
-    }).toList();
-
-    debugPrint('[BXH] sau filter: ${filtered.length}');
-
-    // 4. Sắp xếp theo Tiêu chí (Giờ học hoặc Điểm)
-    if (_metricIndex == 0) {
-      filtered.sort(
-        (a, b) => (b['sort_hours'] as int).compareTo(a['sort_hours'] as int),
-      );
-    } else {
-      filtered.sort(
-        (a, b) => (b['sort_points'] as int).compareTo(a['sort_points'] as int),
-      );
-    }
-
-    // 5. Tìm hạng của chính mình
-    int myIndex = filtered.indexWhere((u) => u['id'] == _userId);
-    if (myIndex != -1) {
-      _myRankData = {...filtered[myIndex], 'rank': myIndex + 1};
-    } else {
-      _myRankData = null; // Chưa có hạng (Điểm = 0)
-    }
-
-    // 6. Lấy Top 5
-    setState(() {
-      _top5List = filtered.take(5).toList();
-    });
   }
 
   Future<void> _exportData({
     Map<String, dynamic>? specificUser,
     bool isHRReport = true,
   }) async {
-    // Chặn xuất báo cáo trên Mobile, chỉ cho phép trên Web
     if (!kIsWeb) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -713,6 +607,22 @@ class _ReportScreenState extends State<ReportScreen> {
     }
 
     try {
+      // BẮT ĐẦU TẢI DỮ LIỆU THÔ KHI BẤM NÚT XUẤT (Lazy Loading)
+      if (_allRawData.isEmpty) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                'Đang trích xuất dữ liệu từ máy chủ, vui lòng đợi...',
+              ),
+              backgroundColor: Colors.blue,
+              duration: Duration(seconds: 4),
+            ),
+          );
+        }
+        await _prepareDataForExport(_periodsConfig);
+      }
+
       var excel = Excel.createExcel();
       List<dynamic> exportList = [];
       String fileName = "";
@@ -726,18 +636,14 @@ class _ReportScreenState extends State<ReportScreen> {
         fileName = "BaoCao_CaNhan_${specificUser['name']}_$timestamp.xlsx";
       } else if (_isAdmin) {
         var allUsers = _allRawData.sublist(0, _allRawData.length - 1);
-
         if (isHRReport) {
-          // Báo cáo Khối Nhân sự: CHỈ lọc danh sách cán bộ có role là 'kns'
           exportList = allUsers.where((u) => u['role'] == 'kns').toList();
           fileName = "BaoCao_KhoiNS_$timestamp.xlsx";
         } else {
-          // Báo cáo TSC: Chỉ lọc danh sách cán bộ có role là 'tsc'
           exportList = allUsers.where((u) => u['role'] == 'tsc').toList();
           fileName = "BaoCao_TSC_$timestamp.xlsx";
         }
       } else {
-        // Đầu mối chỉ xuất được dữ liệu của phòng mình
         exportList = _allRawData
             .sublist(0, _allRawData.length - 1)
             .where((u) => u['department_id'] == _userDeptId)
@@ -754,16 +660,18 @@ class _ReportScreenState extends State<ReportScreen> {
         return;
       }
 
-      Sheet sheet1 = excel['Bao Cao'];
-      excel.delete('Sheet1');
+      // --- TẠO CÁC SHEET MỚI ---
+      Sheet sheet1 = excel['Báo Cáo Tổng Hợp'];
+      Sheet sheet2 = excel['Chi tiết Giờ học'];
+      Sheet sheet3 = excel['Chi tiết Ứng dụng'];
+      excel.delete('Sheet1'); // Xóa sheet mặc định
 
-      // 1. Lấy tên chặng đang được chọn trên UI (Lọc bỏ chuỗi " (Đang Active)" nếu có để báo cáo sạch đẹp)
       String exportPhaseName = _selectedPeriod.replaceAll(' (Đang Active)', '');
 
-      // 2. Định nghĩa Header dựa theo loại báo cáo
-      List<CellValue> header;
+      // HEADER SHEET 1 (Giữ nguyên cấu trúc báo cáo cũ)
+      List<CellValue> header1;
       if (isHRReport) {
-        header = [
+        header1 = [
           TextCellValue('Họ và tên'),
           TextCellValue('Phòng ban'),
           TextCellValue('Khối'),
@@ -777,8 +685,7 @@ class _ReportScreenState extends State<ReportScreen> {
           TextCellValue('Link URL Minh Chứng'),
         ];
       } else {
-        // Báo cáo TSC rút gọn theo yêu cầu
-        header = [
+        header1 = [
           TextCellValue('Họ và tên'),
           TextCellValue('Phòng ban'),
           TextCellValue('Khối'),
@@ -788,7 +695,28 @@ class _ReportScreenState extends State<ReportScreen> {
           TextCellValue('Tổng Điểm'),
         ];
       }
-      sheet1.appendRow(header);
+      sheet1.appendRow(header1);
+
+      // HEADER SHEET 2 (Chi tiết giờ học)
+      sheet2.appendRow([
+        TextCellValue('Đơn vị'),
+        TextCellValue('Họ và tên'),
+        TextCellValue('Tên khóa học'),
+        TextCellValue('Thời gian kê khai (theo đợt)'),
+        TextCellValue('Số giờ học tập'),
+      ]);
+
+      // HEADER SHEET 3 (Chi tiết kết quả ứng dụng)
+      sheet3.appendRow([
+        TextCellValue('Đơn vị'),
+        TextCellValue('Họ và tên'),
+        TextCellValue('Tên khóa học'),
+        TextCellValue('Thời gian ứng dụng (theo đợt)'),
+        TextCellValue('Kiến thức tâm đắc'),
+        TextCellValue('Kết quả ứng dụng'),
+        TextCellValue('Link đính kèm'),
+        TextCellValue('File minh chứng đính kèm'),
+      ]);
 
       // Lấy ngày bắt đầu/kết thúc để lọc dữ liệu rác không thuộc chặng
       DateTime? sDate;
@@ -817,45 +745,93 @@ class _ReportScreenState extends State<ReportScreen> {
         return false;
       }
 
-      // Hàm tự động gen Full Link URL từ Storage và tạo Hyperlink cho Excel
-      CellValue getExcelHyperlink(String? rawPaths) {
+      // SỬA LỖI BLANK MINH CHỨNG: Encode khoảng trắng và cho phép truyền custom text
+      CellValue getExcelHyperlink(String? rawPaths, {String? customText}) {
         if (rawPaths == null || rawPaths.trim().isEmpty) {
           return TextCellValue('');
         }
-
         final String bucketName = 'learning-evidence';
-
         List<String> paths = rawPaths.split(';');
         String firstPath = paths.first.trim();
-
         if (firstPath.isEmpty) {
           return TextCellValue('');
         }
 
-        // Tạo link Public URL
         String publicUrl = Supabase.instance.client.storage
             .from(bucketName)
             .getPublicUrl(firstPath);
+        publicUrl = Uri.encodeFull(
+          publicUrl,
+        ); // Quan trọng: Tránh lỗi file tải về bị Blank trên Windows
 
-        // Thiết lập Giao diện text của link hiển thị trên Excel (Hiển thị xem có bao nhiêu ảnh)
-        String linkText = paths.length > 1
-            ? 'Xem Minh Chứng (+${paths.length - 1} ảnh)'
-            : 'Xem Minh Chứng';
-
-        // Bọc trong hàm HYPERLINK() của Excel để tạo link có thể click trực tiếp
+        String linkText =
+            customText ??
+            (paths.length > 1
+                ? 'Xem Minh Chứng (+${paths.length - 1} file)'
+                : 'Xem Minh Chứng');
         return FormulaCellValue('HYPERLINK("$publicUrl", "$linkText")');
       }
 
-      // 3. Đổ dữ liệu vào các dòng
+      // --- TRUY VẤN DỮ LIỆU CHI TIẾT TỪ BẢNG GỐC CHO SHEET 2 & 3 ---
+      List<String> userIds = exportList.map((u) => u['id'].toString()).toList();
+      List<dynamic> detailHours = [];
+      List<dynamic> detailApps = [];
+      List<dynamic> listAttachments = [];
+
+      if (userIds.isNotEmpty) {
+        try {
+          detailHours = await Supabase.instance.client
+              .from('learning_hours')
+              .select(
+                'user_id, course_name, completion_date, created_at, duration_minutes',
+              )
+              .inFilter('user_id', userIds);
+
+          detailApps = await Supabase.instance.client
+              .from('practical_applications')
+              .select(
+                'id, user_id, course_name, created_at, key_learnings, practical_results, evidence_url',
+              )
+              .inFilter('user_id', userIds);
+
+          listAttachments = await Supabase.instance.client
+              .from('evidence_attachments')
+              .select('record_id, file_path, file_name');
+        } catch (e) {
+          debugPrint("Lỗi tải data chi tiết từ bảng gốc: $e");
+        }
+      }
+
+      // Nhóm dữ liệu để dễ mapping khi lặp danh sách cán bộ
+      Map<String, List<dynamic>> mapHours = {};
+      for (var h in detailHours) {
+        mapHours.putIfAbsent(h['user_id'].toString(), () => []).add(h);
+      }
+
+      Map<String, List<dynamic>> mapApps = {};
+      for (var a in detailApps) {
+        mapApps.putIfAbsent(a['user_id'].toString(), () => []).add(a);
+      }
+
+      Map<String, dynamic> mapAtt = {};
+      for (var att in listAttachments) {
+        mapAtt[att['record_id'].toString()] = att;
+      }
+
+      // --- TIẾN HÀNH ĐỔ DỮ LIỆU VÀO CÁC SHEET ---
       for (var row in exportList) {
+        String uid = row['id'].toString();
+        String dept = row['department_name'] ?? '';
+        String name = row['name'] ?? '';
+
+        // ĐỔ DATA SHEET 1
         if (isHRReport) {
-          // Bóc tách Điểm Ứng dụng thành từng dòng
           if (row['raw_app_dates'] != null) {
             for (var app in (row['raw_app_dates'] as List)) {
               if (!isItemInPeriod(app['date'])) continue;
               sheet1.appendRow([
-                TextCellValue(row['name'] ?? ''),
-                TextCellValue(row['department_name'] ?? ''),
+                TextCellValue(name),
+                TextCellValue(dept),
                 TextCellValue(row['division'] ?? ''),
                 TextCellValue(exportPhaseName),
                 TextCellValue('Sản phẩm Ứng dụng'),
@@ -868,13 +844,12 @@ class _ReportScreenState extends State<ReportScreen> {
               ]);
             }
           }
-          // Bóc tách Giờ học thành từng dòng (Admin có thể xem chi tiết)
           if (row['raw_hour_dates'] != null) {
             for (var hour in (row['raw_hour_dates'] as List)) {
               if (!isItemInPeriod(hour['date'])) continue;
               sheet1.appendRow([
-                TextCellValue(row['name'] ?? ''),
-                TextCellValue(row['department_name'] ?? ''),
+                TextCellValue(name),
+                TextCellValue(dept),
                 TextCellValue(row['division'] ?? ''),
                 TextCellValue(exportPhaseName),
                 TextCellValue('Giờ học'),
@@ -889,8 +864,8 @@ class _ReportScreenState extends State<ReportScreen> {
           }
         } else {
           sheet1.appendRow([
-            TextCellValue(row['name'] ?? ''),
-            TextCellValue(row['department_name'] ?? ''),
+            TextCellValue(name),
+            TextCellValue(dept),
             TextCellValue(row['division'] ?? ''),
             TextCellValue(exportPhaseName),
             IntCellValue(row['sort_hours'] ?? row['total_hours'] ?? 0),
@@ -898,11 +873,68 @@ class _ReportScreenState extends State<ReportScreen> {
             IntCellValue(row['sort_points'] ?? row['total_points'] ?? 0),
           ]);
         }
+
+        // ĐỔ DATA SHEET 2 (Chi tiết giờ học)
+        if (mapHours.containsKey(uid)) {
+          for (var h in mapHours[uid]!) {
+            DateTime? hDate = DateTime.tryParse(
+              h['completion_date'] ?? h['created_at'] ?? '',
+            );
+            if (!isItemInPeriod(hDate)) continue;
+            sheet2.appendRow([
+              TextCellValue(dept),
+              TextCellValue(name),
+              TextCellValue(h['course_name']?.toString() ?? ''),
+              TextCellValue(
+                hDate != null
+                    ? '${hDate.day}/${hDate.month}/${hDate.year}'
+                    : '',
+              ),
+              IntCellValue((h['duration_minutes'] as num?)?.toInt() ?? 0),
+            ]);
+          }
+        }
+
+        // ĐỔ DATA SHEET 3 (Chi tiết kết quả ứng dụng)
+        if (mapApps.containsKey(uid)) {
+          for (var a in mapApps[uid]!) {
+            DateTime? aDate = DateTime.tryParse(a['created_at'] ?? '');
+            if (!isItemInPeriod(aDate)) continue;
+
+            String appId = a['id'].toString();
+            var attInfo = mapAtt[appId];
+            String evidencePath =
+                a['evidence_url']?.toString() ??
+                (attInfo != null ? attInfo['file_path'] : '');
+            String fileNameAtt = attInfo != null
+                ? attInfo['file_name']?.toString() ?? 'Tải file'
+                : 'Xem Minh Chứng';
+
+            sheet3.appendRow([
+              TextCellValue(dept),
+              TextCellValue(name),
+              TextCellValue(a['course_name']?.toString() ?? ''),
+              TextCellValue(
+                aDate != null
+                    ? '${aDate.day}/${aDate.month}/${aDate.year}'
+                    : '',
+              ),
+              TextCellValue(a['key_learnings']?.toString() ?? ''),
+              TextCellValue(a['practical_results']?.toString() ?? ''),
+              getExcelHyperlink(
+                evidencePath,
+                customText: 'Mở Link',
+              ), // Cột Link Đính kèm
+              getExcelHyperlink(
+                evidencePath,
+                customText: fileNameAtt,
+              ), // Cột Minh chứng đính kèm hiển thị tên file
+            ]);
+          }
+        }
       }
 
-      // 4. Luu file Excel tren Web
       final fileBytes = excel.encode();
-
       if (fileBytes == null || fileBytes.isEmpty) {
         throw Exception('Không tạo được dữ liệu Excel.');
       }
@@ -1845,6 +1877,21 @@ class _ReportScreenState extends State<ReportScreen> {
                       onSelectionChanged: (Set<String> newSelection) {
                         setState(() {
                           _allRoleSystemMode = newSelection.first;
+
+                          // Cập nhật lại bộ lọc Phạm vi dựa theo Hệ thi đua
+                          if (_allRoleSystemMode == 'kns') {
+                            _scopeOptions = ['Khối của tôi', 'Phòng của tôi'];
+                            if (_selectedScope == 'Toàn hệ thống') {
+                              _selectedScope =
+                                  'Khối của tôi'; // Đẩy về mặc định hợp lệ
+                            }
+                          } else {
+                            _scopeOptions = [
+                              'Toàn hệ thống',
+                              'Khối của tôi',
+                              'Phòng của tôi',
+                            ];
+                          }
                         });
                         _updatePeriodDropdownState(); // Reset Dropdown theo Hệ vừa chọn
                         _processRanking(); // Tải lại BXH
@@ -1977,7 +2024,7 @@ class _ReportScreenState extends State<ReportScreen> {
                 ),
                 const Divider(height: 1, thickness: 1),
                 Expanded(
-                  child: _top5List.isEmpty
+                  child: _rankingData.isEmpty
                       ? Center(
                           child: Padding(
                             padding: const EdgeInsets.all(16.0),
@@ -1988,144 +2035,81 @@ class _ReportScreenState extends State<ReportScreen> {
                             ),
                           ),
                         )
-                      : ListView.builder(
-                          padding: const EdgeInsets.all(12),
-                          itemCount: _top5List.length,
-                          itemBuilder: (context, index) {
-                            final user = _top5List[index];
-                            final isMe = user['id'] == _userId;
-                            return Card(
-                              elevation: isMe ? 4 : 1,
-                              color: isMe ? Colors.amber.shade50 : Colors.white,
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(12),
-                                side: BorderSide(
-                                  color: isMe
-                                      ? Colors.amber
-                                      : Colors.transparent,
-                                  width: 1.5,
-                                ),
-                              ),
-                              child: ListTile(
-                                leading: CircleAvatar(
-                                  backgroundColor: index == 0
-                                      ? Colors.amber
-                                      : (index == 1
-                                            ? Colors.grey.shade400
-                                            : (index == 2
-                                                  ? Colors.brown.shade300
-                                                  : Colors.blue.shade50)),
-                                  child: Text(
-                                    '${index + 1}',
-                                    style: TextStyle(
-                                      fontWeight: FontWeight.bold,
-                                      color: index < 3
-                                          ? Colors.white
-                                          : Colors.blue.shade900,
-                                    ),
-                                  ),
-                                ),
-                                title: Text(
-                                  user['name'],
-                                  style: TextStyle(
-                                    fontWeight: FontWeight.bold,
-                                    color: isMe
-                                        ? Colors.amber.shade900
-                                        : Colors.black87,
-                                  ),
-                                ),
-                                subtitle: Text(
-                                  [user['department_name'], user['division']]
-                                      .where(
-                                        (e) =>
-                                            e != null &&
-                                            e.toString().trim().isNotEmpty,
-                                      )
-                                      .join(' - '),
-                                  style: const TextStyle(fontSize: 12),
-                                ),
-                                trailing: Text(
-                                  '${_metricIndex == 0 ? user['sort_hours'] : user['sort_points']} ${_metricIndex == 0 ? "phút" : "điểm"}',
-                                  style: TextStyle(
-                                    fontWeight: FontWeight.bold,
-                                    fontSize: 16,
-                                    color: _metricIndex == 0
-                                        ? Colors.green.shade700
-                                        : Colors.blue.shade700,
-                                  ),
-                                ),
-                              ),
-                            );
-                          },
-                        ),
+                      : _buildSmartLeaderboardList(),
                 ),
                 // Sticky Card "Thành tích của Bạn"
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 16,
-                    vertical: 12,
-                  ),
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withValues(alpha: 0.05),
-                        blurRadius: 10,
-                        offset: const Offset(0, -5),
-                      ),
-                    ],
-                  ),
-                  child: Row(
-                    children: [
-                      CircleAvatar(
-                        backgroundColor: _myRankData != null
-                            ? Colors.blue.shade800
-                            : Colors.grey,
-                        child: Text(
-                          _myRankData != null ? '${_myRankData!['rank']}' : '-',
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontWeight: FontWeight.bold,
+                // TỐI ƯU UX: Chỉ hiện thanh dính đáy nếu user chưa có thành tích (null)
+                // HOẶC hạng của họ lớn hơn số lượng Top đang hiển thị trên màn hình (_currentOffset).
+                if (_myRankData == null ||
+                    (_myRankData!['rank'] as num).toInt() > _currentOffset)
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 12,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withValues(alpha: 0.05),
+                          blurRadius: 10,
+                          offset: const Offset(0, -5),
+                        ),
+                      ],
+                    ),
+                    child: Row(
+                      children: [
+                        CircleAvatar(
+                          backgroundColor: _myRankData != null
+                              ? Colors.blue.shade800
+                              : Colors.grey,
+                          child: Text(
+                            _myRankData != null
+                                ? '${_myRankData!['rank']}'
+                                : '-',
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontWeight: FontWeight.bold,
+                            ),
                           ),
                         ),
-                      ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              'Thành tích của Bạn',
-                              style: TextStyle(
-                                fontWeight: FontWeight.bold,
-                                color: Colors.blue.shade900,
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'Thành tích của Bạn',
+                                style: TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                  color: Colors.blue.shade900,
+                                ),
                               ),
-                            ),
-                            Text(
-                              _myRankData != null
-                                  ? 'Bạn đang xếp thứ ${_myRankData!['rank']} trong ${_selectedScope.toLowerCase()}'
-                                  : 'Bạn chưa có thành tích trong giai đoạn này.',
-                              style: const TextStyle(
-                                fontSize: 12,
-                                color: Colors.grey,
+                              Text(
+                                _myRankData != null
+                                    ? 'Bạn đang xếp thứ ${_myRankData!['rank']} trong ${_selectedScope.toLowerCase()}'
+                                    : 'Bạn chưa có thành tích trong giai đoạn này.',
+                                style: const TextStyle(
+                                  fontSize: 12,
+                                  color: Colors.grey,
+                                ),
                               ),
-                            ),
-                          ],
+                            ],
+                          ),
                         ),
-                      ),
-                      Text(
-                        '${_myRankData != null ? (_metricIndex == 0 ? _myRankData!['sort_hours'] : _myRankData!['sort_points']) : 0} ${_metricIndex == 0 ? "phút" : "điểm"}',
-                        style: TextStyle(
-                          fontWeight: FontWeight.bold,
-                          fontSize: 16,
-                          color: _metricIndex == 0
-                              ? Colors.green.shade700
-                              : Colors.blue.shade700,
+                        Text(
+                          '${_myRankData != null ? (_metricIndex == 0 ? _myRankData!['sort_hours'] : _myRankData!['sort_points']) : 0} ${_metricIndex == 0 ? "phút" : "điểm"}',
+                          style: TextStyle(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 16,
+                            color: _metricIndex == 0
+                                ? Colors.green.shade700
+                                : Colors.blue.shade700,
+                          ),
                         ),
-                      ),
-                    ],
+                      ],
+                    ),
                   ),
-                ),
               ],
             ),
 
@@ -2222,6 +2206,127 @@ class _ReportScreenState extends State<ReportScreen> {
         ),
       ),
     );
+  }
+
+  // Render Bảng xếp hạng thông minh có Gap (...) và nút Tải thêm
+  Widget _buildSmartLeaderboardList() {
+    List<Widget> items = [];
+
+    for (int i = 0; i < _rankingData.length; i++) {
+      final user = _rankingData[i];
+      final isMe = user['id'] == _userId;
+      final int rank = user['rank'] ?? 0;
+
+      // UX XỊN: Xử lý vẽ khoảng trống (...) nếu hạng bị nhảy cóc
+      if (i > 0) {
+        int prevRank = _rankingData[i - 1]['rank'] ?? 0;
+        if (rank > prevRank + 1) {
+          items.add(
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              child: Row(
+                children: [
+                  const Expanded(child: Divider()),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    child: Text(
+                      '... ${rank - prevRank - 1} đồng nghiệp ...',
+                      style: TextStyle(
+                        color: Colors.grey.shade500,
+                        fontSize: 12,
+                        fontStyle: FontStyle.italic,
+                      ),
+                    ),
+                  ),
+                  const Expanded(child: Divider()),
+                ],
+              ),
+            ),
+          );
+        }
+      }
+
+      // Vẽ thẻ User
+      items.add(
+        Card(
+          elevation: isMe ? 4 : 1,
+          color: isMe ? Colors.amber.shade50 : Colors.white,
+          margin: const EdgeInsets.symmetric(vertical: 4),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+            side: BorderSide(
+              color: isMe ? Colors.amber : Colors.transparent,
+              width: 1.5,
+            ),
+          ),
+          child: ListTile(
+            leading: CircleAvatar(
+              backgroundColor: rank == 1
+                  ? Colors.amber
+                  : (rank == 2
+                        ? Colors.grey.shade400
+                        : (rank == 3
+                              ? Colors.brown.shade300
+                              : Colors.blue.shade50)),
+              child: Text(
+                '$rank',
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  color: rank <= 3 ? Colors.white : Colors.blue.shade900,
+                ),
+              ),
+            ),
+            title: Text(
+              user['name'] ?? 'Ẩn danh',
+              style: TextStyle(
+                fontWeight: FontWeight.bold,
+                color: isMe ? Colors.amber.shade900 : Colors.black87,
+              ),
+            ),
+            subtitle: Text(
+              [user['department_name'], user['division']]
+                  .where((e) => e != null && e.toString().trim().isNotEmpty)
+                  .join(' - '),
+              style: const TextStyle(fontSize: 12),
+            ),
+            trailing: Text(
+              '${_metricIndex == 0 ? user['sort_hours'] : user['sort_points']} ${_metricIndex == 0 ? "phút" : "điểm"}',
+              style: TextStyle(
+                fontWeight: FontWeight.bold,
+                fontSize: 16,
+                color: _metricIndex == 0
+                    ? Colors.green.shade700
+                    : Colors.blue.shade700,
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
+    // Vẽ nút Tải thêm ở cuối cùng nếu chưa cạn kiệt Data
+    if (_hasMoreData) {
+      items.add(
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 16),
+          child: Center(
+            child: _isLoadingMore
+                ? const CircularProgressIndicator()
+                : OutlinedButton.icon(
+                    onPressed: () => _processRanking(isLoadMore: true),
+                    icon: const Icon(Icons.expand_more),
+                    label: const Text('Xem thêm 10 hạng tiếp theo'),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: Colors.blue.shade700,
+                      side: BorderSide(color: Colors.blue.shade200),
+                    ),
+                  ),
+          ),
+        ),
+      );
+    }
+
+    return ListView(padding: const EdgeInsets.all(12), children: items);
   }
 
   // Helper vẽ Chip điểm cho KNS
