@@ -492,6 +492,7 @@ class _ReportScreenState extends State<ReportScreen> {
             'val': hrs,
             'event_name': ev['event_name'] ?? 'Không rõ',
             'phase_batch': ev['phase_batch'],
+            'evidence_url': ev['evidence_url'],
           });
         }
       }
@@ -704,6 +705,7 @@ class _ReportScreenState extends State<ReportScreen> {
         TextCellValue('Tên khóa học'),
         TextCellValue('Thời gian kê khai (theo đợt)'),
         TextCellValue('Số giờ học tập'),
+        TextCellValue('Link minh chứng'),
       ]);
 
       // HEADER SHEET 3 (Chi tiết kết quả ứng dụng)
@@ -783,7 +785,7 @@ class _ReportScreenState extends State<ReportScreen> {
           detailHours = await Supabase.instance.client
               .from('learning_hours')
               .select(
-                'user_id, course_name, completion_date, created_at, duration_minutes',
+                'id, user_id, course_name, completion_date, created_at, duration_minutes',
               )
               .inFilter('user_id', userIds);
 
@@ -858,7 +860,7 @@ class _ReportScreenState extends State<ReportScreen> {
                 TextCellValue(''),
                 TextCellValue(''),
                 TextCellValue(''),
-                TextCellValue(''),
+                getExcelHyperlink(hour['evidence_url']?.toString()),
               ]);
             }
           }
@@ -881,6 +883,11 @@ class _ReportScreenState extends State<ReportScreen> {
               h['completion_date'] ?? h['created_at'] ?? '',
             );
             if (!isItemInPeriod(hDate)) continue;
+
+            String hId = h['id'].toString();
+            var attInfo = mapAtt[hId];
+            String evidencePath = attInfo != null ? attInfo['file_path'] : '';
+
             sheet2.appendRow([
               TextCellValue(dept),
               TextCellValue(name),
@@ -891,6 +898,7 @@ class _ReportScreenState extends State<ReportScreen> {
                     : '',
               ),
               IntCellValue((h['duration_minutes'] as num?)?.toInt() ?? 0),
+              getExcelHyperlink(evidencePath, customText: 'Xem Minh Chứng'),
             ]);
           }
         }
