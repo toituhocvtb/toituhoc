@@ -578,28 +578,45 @@ $content
         if (r['rule_key'] == 'tsc_max_ai') tscMaxAi = r['points'];
       }
 
-      // TẢI DỮ LIỆU TỪ BẢNG ẢO
-      List<dynamic> events = [];
-      int start = 0;
-      while (true) {
-        final res = await Supabase.instance.client
-            .from('v_leaderboard_events')
-            .select(
-              'user_id, division, department_id, role, hours, points, ai_points, event_date',
-            )
-            .range(start, start + 999);
-        events.addAll(res);
-        if (res.length < 1000) break;
-        start += 1000;
-      }
-
-      // Role của đợt đang xét dựa trên lựa chọn filter
+      // Role của đợt đang xét dựa trên lựa chọn filter (Nhấc lên trước để lọc trực tiếp trên Database)
       String targetRole = 'tsc';
       if (_selectedFilterPeriod != null &&
           _selectedFilterPeriod!.containsKey('target_role')) {
         targetRole = _selectedFilterPeriod!['target_role'] ?? 'tsc';
       } else if (_isKNS) {
         targetRole = 'kns';
+      }
+
+      // TẢI DỮ LIỆU TỪ BẢNG ẢO
+      List<dynamic> events = [];
+      int start = 0;
+      while (true) {
+        var query = Supabase.instance.client
+            .from('v_leaderboard_events')
+            .select(
+              'user_id, division, department_id, role, hours, points, ai_points, event_date',
+            );
+
+        // Lọc thẳng trên DB: Chỉ lấy người cùng Role (hoặc lai 'all')
+        query = query.inFilter('role', [targetRole, 'all']);
+
+        // Lọc thẳng trên DB: Chỉ lấy dữ liệu đúng chặng thời gian
+        if (sDate != null) {
+          query = query.gte('event_date', sDate.toIso8601String());
+        }
+        if (eDate != null) {
+          query = query.lt(
+            'event_date',
+            eDate.add(const Duration(days: 1)).toIso8601String(),
+          );
+        }
+
+        // BẢO LƯU: Vẫn dùng range() phân trang để đảm bảo tuyệt đối không bỏ sót 4054+ người
+        final res = await query.range(start, start + 999);
+        events.addAll(res);
+
+        if (res.length < 1000) break;
+        start += 1000;
       }
 
       Map<String, int> userHours = {};

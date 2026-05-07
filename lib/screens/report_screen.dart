@@ -264,6 +264,19 @@ class _ReportScreenState extends State<ReportScreen> {
   }
 
   void _showAppDetailsDialog(Map<String, dynamic> item) {
+    // 1. Phân tích loại hoạt động KNS
+    bool isShare = item['is_shared_group'] == true;
+    bool isSpeaker = item['is_speaker'] == true;
+    String? coffeeName = item['coffee_talk_name']?.toString();
+    bool isCoffee = coffeeName != null && coffeeName.trim().isNotEmpty;
+
+    // 2. Phân tích nội dung text ứng dụng tiêu chuẩn
+    String? keyLearnings = item['key_learnings']?.toString();
+    String? practicalResults = item['practical_results']?.toString();
+    bool hasStandardApp =
+        (keyLearnings != null && keyLearnings.trim().isNotEmpty) ||
+        (practicalResults != null && practicalResults.trim().isNotEmpty);
+
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -280,35 +293,139 @@ class _ReportScreenState extends State<ReportScreen> {
             crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Text(
-                'Kiến thức tâm đắc:',
-                style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
-              ),
-              const SizedBox(height: 4),
-              Text(
-                item['key_learnings']?.toString() ?? 'Không có dữ liệu',
-                style: const TextStyle(color: Colors.black54, fontSize: 13),
-              ),
-              const SizedBox(height: 12),
-              const Text(
-                'Thực tế áp dụng:',
-                style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
-              ),
-              const SizedBox(height: 4),
-              Text(
-                item['practical_results']?.toString() ?? 'Không có dữ liệu',
-                style: const TextStyle(color: Colors.black54, fontSize: 13),
-              ),
+              // --- PHẦN 1: HOẠT ĐỘNG KNS ĐẶC THÙ ---
+              if (isShare || isSpeaker || isCoffee) ...[
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(10),
+                  margin: const EdgeInsets.only(bottom: 12),
+                  decoration: BoxDecoration(
+                    color: Colors.orange.shade50,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: Colors.orange.shade200),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Các hoạt động KNS đã ghi nhận:',
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          color: Colors.orange,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      if (isShare)
+                        const Row(
+                          children: [
+                            Icon(
+                              Icons.check_circle,
+                              color: Colors.green,
+                              size: 16,
+                            ),
+                            SizedBox(width: 6),
+                            Text(
+                              'Chia sẻ nhóm (Share Group)',
+                              style: TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                          ],
+                        ),
+                      if (isCoffee)
+                        Padding(
+                          padding: EdgeInsets.only(top: isShare ? 6.0 : 0),
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Icon(
+                                Icons.coffee,
+                                color: Colors.brown,
+                                size: 16,
+                              ),
+                              const SizedBox(width: 6),
+                              Expanded(
+                                child: Text(
+                                  'Đào tạo Coffee Talk:\n$coffeeName',
+                                  style: const TextStyle(
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w500,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      if (isSpeaker)
+                        Padding(
+                          padding: EdgeInsets.only(
+                            top: (isShare || isCoffee) ? 6.0 : 0,
+                          ),
+                          child: const Row(
+                            children: [
+                              Icon(Icons.mic, color: Colors.purple, size: 16),
+                              SizedBox(width: 6),
+                              Text(
+                                'Đứng lớp Diễn giả (Speaker)',
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ],
+
+              // --- PHẦN 2: NỘI DUNG ỨNG DỤNG TIÊU CHUẨN ---
+              if (hasStandardApp) ...[
+                const Text(
+                  'Kiến thức tâm đắc:',
+                  style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  keyLearnings ?? 'Không có dữ liệu',
+                  style: const TextStyle(color: Colors.black87, fontSize: 13),
+                ),
+                const SizedBox(height: 12),
+                const Text(
+                  'Thực tế áp dụng:',
+                  style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  practicalResults ?? 'Không có dữ liệu',
+                  style: const TextStyle(color: Colors.black87, fontSize: 13),
+                ),
+              ] else if (!isShare && !isSpeaker && !isCoffee) ...[
+                // Fallback nếu bài này rỗng hoàn toàn (Chống blank UI)
+                const Text(
+                  'Bản kê khai này chưa có nội dung chi tiết.',
+                  style: TextStyle(
+                    color: Colors.grey,
+                    fontStyle: FontStyle.italic,
+                    fontSize: 13,
+                  ),
+                ),
+              ],
+
               const Padding(
                 padding: EdgeInsets.symmetric(vertical: 12.0),
                 child: Divider(height: 1, thickness: 1),
               ),
+
+              // --- PHẦN 3: ĐIỂM & ĐÁNH GIÁ AI ---
               Row(
                 children: [
                   const Icon(Icons.stars, color: Colors.orange, size: 22),
                   const SizedBox(width: 8),
                   Text(
-                    'Điểm đạt được: ${item['gamification_points'] ?? 0} điểm',
+                    'Tổng điểm đạt được: ${item['gamification_points'] ?? 0} điểm',
                     style: const TextStyle(
                       fontWeight: FontWeight.bold,
                       color: Colors.orange,
@@ -526,12 +643,6 @@ class _ReportScreenState extends State<ReportScreen> {
     try {
       int limit = isLoadMore ? 10 : 5;
 
-      // 1. IN RA ĐỂ BẮT LỖI THÔNG SỐ GỬI ĐI
-      debugPrint('--- [DEBUG] THÔNG SỐ GỬI XUỐNG DB ---');
-      debugPrint(
-        'Scope: $_selectedScope | Division: "$_userDivision" | DeptId: $_userDeptId | Metric: $_metricIndex',
-      );
-
       final res = await Supabase.instance.client.rpc(
         'get_smart_leaderboard',
         params: {
@@ -546,10 +657,6 @@ class _ReportScreenState extends State<ReportScreen> {
           'p_req_user_id': _userId,
         },
       );
-
-      // 2. IN RA KẾT QUẢ DB TRẢ VỀ
-      debugPrint('--- [DEBUG] KẾT QUẢ TỪ DB ---');
-      debugPrint(res.toString());
 
       final List<dynamic> fetchedData = res as List<dynamic>;
 
