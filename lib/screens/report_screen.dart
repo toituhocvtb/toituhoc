@@ -2213,7 +2213,11 @@ class _ReportScreenState extends State<ReportScreen> {
                           ),
                         ),
                         Text(
-                          '${_myRankData != null ? (_metricIndex == 0 ? _myRankData!['sort_hours'] : _myRankData!['sort_points']) : 0} ${_metricIndex == 0 ? "phút" : "điểm"}',
+                          _metricIndex == 0
+                              ? (_myRankData != null
+                                    ? '${(_myRankData!['sort_hours'] ?? 0) ~/ 60} giờ ${(_myRankData!['sort_hours'] ?? 0) % 60} phút'
+                                    : '0 phút')
+                              : '${_myRankData != null ? _myRankData!['sort_points'] : 0} điểm',
                           style: TextStyle(
                             fontWeight: FontWeight.bold,
                             fontSize: 16,
@@ -2405,7 +2409,9 @@ class _ReportScreenState extends State<ReportScreen> {
               style: const TextStyle(fontSize: 12),
             ),
             trailing: Text(
-              '${_metricIndex == 0 ? user['sort_hours'] : user['sort_points']} ${_metricIndex == 0 ? "phút" : "điểm"}',
+              _metricIndex == 0
+                  ? '${(user['sort_hours'] ?? 0) ~/ 60} giờ ${(user['sort_hours'] ?? 0) % 60} phút'
+                  : '${user['sort_points'] ?? 0} điểm',
               style: TextStyle(
                 fontWeight: FontWeight.bold,
                 fontSize: 16,
