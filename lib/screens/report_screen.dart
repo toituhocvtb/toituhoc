@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:excel/excel.dart' hide Border;
 
@@ -223,7 +224,7 @@ class _ReportScreenState extends State<ReportScreen> {
             .from('learning_hours')
             // Bổ sung completion_date để xếp chặng chính xác
             .select(
-              'id, course_name, duration_minutes, platform, created_at, completion_date',
+              'id, course_name, duration_minutes, platform, created_at, completion_date, evidence_url',
             )
             .eq('user_id', userId)
             .order('created_at', ascending: false);
@@ -1138,59 +1139,98 @@ class _ReportScreenState extends State<ReportScreen> {
       text: item['duration_minutes'].toString(),
     );
     final formKey = GlobalKey<FormState>();
+    PlatformFile? newEvidenceFile;
 
     final confirm = await showDialog<bool>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Sửa thời gian học'),
-        content: Form(
-          key: formKey,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                'Khóa học: ${item['course_name']}',
-                style: const TextStyle(fontWeight: FontWeight.bold),
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setStateDialog) {
+          return AlertDialog(
+            title: const Text('Sửa thời gian học'),
+            content: Form(
+              key: formKey,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Khóa học: ${item['course_name']}',
+                    style: const TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 16),
+                  TextFormField(
+                    controller: timeController,
+                    keyboardType: TextInputType.number,
+                    inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                    decoration: const InputDecoration(
+                      labelText: 'Thời gian học (phút)',
+                      border: OutlineInputBorder(),
+                      suffixText: 'phút',
+                    ),
+                    validator: (val) {
+                      if (val == null || val.trim().isEmpty) {
+                        return 'Vui lòng nhập số phút';
+                      }
+                      final numVal = int.tryParse(val.trim());
+                      if (numVal == null || numVal <= 0) {
+                        return 'Số phút phải > 0';
+                      }
+                      return null;
+                    },
+                  ),
+                  const SizedBox(height: 16),
+                  const Text(
+                    'Ảnh minh chứng bổ sung:',
+                    style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
+                  ),
+                  const SizedBox(height: 8),
+                  OutlinedButton.icon(
+                    onPressed: () async {
+                      final result = await FilePicker.pickFiles(
+                        type: FileType.image,
+                        allowMultiple: false,
+                      );
+                      if (result != null) {
+                        setStateDialog(() {
+                          newEvidenceFile = result.files.first;
+                        });
+                      }
+                    },
+                    icon: const Icon(Icons.add_photo_alternate),
+                    label: const Text('Chọn ảnh đính kèm...'),
+                  ),
+                  if (newEvidenceFile != null)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8.0),
+                      child: Text(
+                        'Đã chọn: ${newEvidenceFile!.name}',
+                        style: const TextStyle(
+                          color: Colors.green,
+                          fontSize: 12,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                ],
               ),
-              const SizedBox(height: 16),
-              TextFormField(
-                controller: timeController,
-                keyboardType: TextInputType.number,
-                inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-                decoration: const InputDecoration(
-                  labelText: 'Thời gian học (phút)',
-                  border: OutlineInputBorder(),
-                  suffixText: 'phút',
-                ),
-                validator: (val) {
-                  if (val == null || val.trim().isEmpty) {
-                    return 'Vui lòng nhập số phút';
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('Hủy', style: TextStyle(color: Colors.grey)),
+              ),
+              ElevatedButton(
+                onPressed: () {
+                  if (formKey.currentState!.validate()) {
+                    Navigator.pop(ctx, true);
                   }
-                  final numVal = int.tryParse(val.trim());
-                  if (numVal == null || numVal <= 0) {
-                    return 'Số phút phải > 0';
-                  }
-                  return null;
                 },
+                child: const Text('Lưu thay đổi'),
               ),
             ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Hủy', style: TextStyle(color: Colors.grey)),
-          ),
-          ElevatedButton(
-            onPressed: () {
-              if (formKey.currentState!.validate()) {
-                Navigator.pop(ctx, true);
-              }
-            },
-            child: const Text('Lưu thay đổi'),
-          ),
-        ],
+          );
+        },
       ),
     );
 
@@ -1199,15 +1239,46 @@ class _ReportScreenState extends State<ReportScreen> {
     setState(() => _isLoadingHistory = true);
     try {
       final newTime = int.parse(timeController.text.trim());
+      String currentEvidence = item['evidence_url']?.toString() ?? '';
+      String finalEvidencePath = currentEvidence;
+
+      // Xử lý upload ảnh bổ sung nếu có
+      if (newEvidenceFile != null) {
+        final timestamp = DateTime.now().millisecondsSinceEpoch;
+        final ext = newEvidenceFile!.extension ?? 'jpg';
+        final fileName = 'edit_evidence_${_userId}_$timestamp.$ext';
+        final storagePath = 'edits/$fileName';
+
+        if (kIsWeb) {
+          await Supabase.instance.client.storage
+              .from('learning-evidence')
+              .uploadBinary(storagePath, newEvidenceFile!.bytes!);
+        } else {
+          await Supabase.instance.client.storage
+              .from('learning-evidence')
+              .upload(storagePath, File(newEvidenceFile!.path!));
+        }
+
+        // Nối thêm link mới vào danh sách hiện tại bằng dấu ;
+        if (finalEvidencePath.isEmpty) {
+          finalEvidencePath = storagePath;
+        } else {
+          finalEvidencePath = '$finalEvidencePath;$storagePath';
+        }
+      }
+
       await Supabase.instance.client
           .from('learning_hours')
-          .update({'duration_minutes': newTime})
+          .update({
+            'duration_minutes': newTime,
+            if (newEvidenceFile != null) 'evidence_url': finalEvidencePath,
+          })
           .eq('id', item['id']);
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('Cập nhật thời gian học thành công'),
+            content: Text('Cập nhật thời gian học và minh chứng thành công'),
             backgroundColor: Colors.green,
           ),
         );
