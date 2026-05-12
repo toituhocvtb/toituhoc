@@ -155,7 +155,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
       if (item['is_speaker'] == true) {
         totalPoints += _speakerPts;
       }
-      // Cập nhật Database
+      // Cập nhật Database.
       await Supabase.instance.client
           .from('practical_applications')
           .update({
