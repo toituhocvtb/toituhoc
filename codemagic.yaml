@@ -19,7 +19,7 @@ workflows:
       flutter: 3.41.4
       vars:
         FLUTTER_VERSION: "3.41.4"
-        IOS_TARGET_PATCH_VERSION: "1.1.12+58"
+        IOS_TARGET_PATCH_VERSION: "1.0.0+17"
         IOS_BUNDLE_ID: "vn.com.vietinbank.toituhoc"
         IOS_CERT_COMMON_NAME: "Apple Distribution: Le Nhung (6KYDAR364C)"
       groups:

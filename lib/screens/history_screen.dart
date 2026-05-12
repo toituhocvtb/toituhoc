@@ -174,7 +174,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
         ),
       );
 
-      _fetchHistoryData(); // Tải lại danh sách
+      _fetchHistoryData(); // Tải lại danh sách..
     } catch (e) {
       if (!mounted) return;
       setState(() => _isLoading = false);
