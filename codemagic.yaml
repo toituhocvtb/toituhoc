@@ -316,6 +316,7 @@ workflows:
             shorebird patch android \
               --release-version="$ANDROID_TARGET_PATCH_VERSION" \
               --no-confirm \
+              --allow-asset-diffs \
               --dart-define=GROQ_API_KEY="$GROQ_API_KEY"
           }
 
